@@ -18,7 +18,7 @@ const MISURE = [["larghezza", "Larghezza"], ["altezza_sx", "Altezza sinistra"], 
 const misureDi = a => (a.altezza !== undefined && a.altezza !== "") ? [MISURE[0], ["altezza", "Altezza (vecchio rilievo)"], ...MISURE.slice(1)] : MISURE;
 const CHIAVE_CONFIG = "giode_rilievi_cfg";
 const API = "https://api.github.com";
-const VERSIONE_APP = "7 (24/11/2026)";   // da cambiare insieme a VERSIONE in sw.js a ogni pubblicazione
+const VERSIONE_APP = "8 (24/11/2026)";   // da cambiare insieme a VERSIONE in sw.js a ogni pubblicazione
 
 const $app = document.getElementById("app");
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -152,7 +152,7 @@ function nomiFoto(r) {
 const daInviare = r => !r.bozza && (!(r._sync && r._sync.inviato === r.modificato) || nomiFoto(r).some(n => !(r._sync.foto || {})[n]));
 const contaAperture = r => (r.stanze || []).reduce((n, s) => n + (s.aperture || []).length, 0);
 // rilievo senza niente dentro (nessun dato del cliente, indirizzo, note, stanze o foto): non vale la pena tenerlo
-const rilievoVuoto = r => !(r.cliente && (r.cliente.nome || r.cliente.telefono || r.cliente.email)) && !(r.indirizzo && r.indirizzo.testo)
+const rilievoVuoto = r => !r.eliminato && !(r.cliente && (r.cliente.nome || r.cliente.telefono || r.cliente.email)) && !(r.indirizzo && r.indirizzo.testo)
   && !String(r.note || "").trim() && !(r.stanze || []).length && !(r.foto || []).length;
 
 function nuovoRilievo() {
@@ -341,7 +341,7 @@ function barra(titolo, { indietro, impostazioni, stato } = {}) {
 async function vistaHome(conservaScroll) {
   const scrollPrima = window.scrollY;
   rilievo = null;
-  const elenco = (await db.tutti()).sort((a, b) => (b.data + b.modificato).localeCompare(a.data + a.modificato));
+  const elenco = (await db.tutti()).filter(r => !r.eliminato).sort((a, b) => (b.data + b.modificato).localeCompare(a.data + a.modificato));
   const cfg = config();
   const attesa = elenco.filter(daInviare).length;
   const appenaCollegato = cfg && !standalone() && location.hash.startsWith("#cfg=");
@@ -695,7 +695,7 @@ function disegnaEditor() {
       <label>Note generali<textarea data-p='["note"]' rows="3">${esc(r.note)}</textarea></label>
       ${blocchiFoto([], r.foto)}
     </section>
-    <button class="btn btn-largo btn-pericolo" data-az="elimina-rilievo">Elimina questo rilievo dal telefono</button>
+    <button class="btn btn-largo btn-pericolo" data-az="elimina-rilievo">Elimina questo rilievo (da tutti i telefoni e dal PC)</button>
     <datalist id="elenco-tende">${TENDE.map(t => `<option value="${esc(t)}">`).join("")}</datalist>
   </main>
   <div class="fondo"><div><button class="btn btn-primario" data-az="salva-rilievo">💾 Salva</button><button class="btn" data-az="esci-rilievo">Esci</button></div></div>`;
@@ -817,9 +817,43 @@ async function provaConnessione() {
 
 // ------------------------------------------------------------------------------------------------ invio a GitHub
 let invioInCorso = false;
+// Cancellare un rilievo: su GitHub al posto dei dati resta un segno «eliminato», che arriva a tutti gli altri telefoni e al PC.
+// Senza questo segno un telefono che ha ancora il rilievo lo rimanderebbe e riapparirebbe dappertutto.
+async function eliminaRilievoDefinitivo(id) {
+  const r = await db.leggi(id);
+  if (!r) return;
+  for (const n of nomiFoto(r)) await db.eliminaFoto(`${id}/${n}`);
+  if (!(r._sync && (r._sync.inviato || r._sync.sha))) { await db.elimina(id); return; }   // mai arrivato su GitHub: basta toglierlo da qui
+  await db.salva({ id, eliminato: true, modificato: adesso(), data: r.data, foto: [], _sync: { inviato: "", foto: {} } });
+}
+
+async function inviaCancellazione(r) {
+  const contenuto = aBase64Testo(JSON.stringify({ id: r.id, eliminato: true, modificato: r.modificato }));
+  let risposta = null;
+  for (let tentativo = 0; tentativo < 2; tentativo++) {
+    const esistente = await gh("GET", `rilievi/${r.id}.json`);
+    try { risposta = await gh("PUT", `rilievi/${r.id}.json`, { message: "Rilievo eliminato", content: contenuto, ...(esistente ? { sha: esistente.sha } : {}) }); break; }
+    catch (e) { if (tentativo || (e.stato !== 409 && e.stato !== 422)) throw e; }
+  }
+  try {   // anche le foto su GitHub, per non occupare spazio
+    const foto = await gh("GET", `foto/${r.id}`);
+    if (Array.isArray(foto)) for (const f of foto) { try { await gh("DELETE", `foto/${r.id}/${f.name}`, { message: "Foto di un rilievo eliminato", sha: f.sha }); } catch (e) { /* pulizia non essenziale */ } }
+  } catch (e) { /* pulizia non essenziale */ }
+  const fresco = (await db.leggi(r.id)) || r;
+  fresco._sync = { inviato: r.modificato, foto: {}, sha: risposta && risposta.content ? risposta.content.sha : undefined };
+  await db.salva(fresco);
+}
+
+// il rilievo è stato cancellato altrove (PC o altro telefono): si toglie anche da qui e si tiene il segno, così non riappare
+async function applicaCancellazione(id, remoto, sha, locale) {
+  if (locale) for (const n of nomiFoto(locale)) await db.eliminaFoto(`${id}/${n}`);
+  await db.salva({ id, eliminato: true, modificato: remoto.modificato || adesso(), foto: [], _sync: { inviato: remoto.modificato || "", foto: {}, sha } });
+}
+
 async function inviaRilievo(id, avanza) {
   const r = await db.leggi(id);
   if (!r) return;
+  if (r.eliminato) return inviaCancellazione(r);
   const inviate = { ...((r._sync && r._sync.foto) || {}) };
   const nomi = nomiFoto(r);
   for (const [n, nome] of nomi.entries()) {
@@ -837,6 +871,12 @@ async function inviaRilievo(id, avanza) {
   let risposta = null;
   for (let tentativo = 0; tentativo < 2; tentativo++) {
     const esistente = await gh("GET", `rilievi/${r.id}.json`);
+    if (esistente && esistente.content) {   // nel frattempo è stato cancellato altrove: la cancellazione vince, non si rimanda
+      try {
+        const e = JSON.parse(decodifica64(esistente.content));
+        if (e && e.eliminato) { await applicaCancellazione(r.id, e, esistente.sha, r); return; }
+      } catch (err) { /* contenuto non leggibile: si procede */ }
+    }
     try { risposta = await gh("PUT", `rilievi/${r.id}.json`, { message: "Rilievo " + (r.cliente.nome || r.id), content: contenuto, ...(esistente ? { sha: esistente.sha } : {}) }); break; }
     catch (e) { if (tentativo || (e.stato !== 409 && e.stato !== 422)) throw e; }
   }
@@ -898,12 +938,19 @@ async function scaricaRilievi() {
     if (!/^[\w\-]{6,64}$/.test(id) || (rilievo && rilievo.id === id)) continue;
     const loc = await db.leggi(id);
     if (loc && loc._sync && loc._sync.sha === voce.sha) continue;        // invariato dall'ultima volta
-    if (loc && (loc.bozza || daInviare(loc))) continue;                  // qui ci sono modifiche in attesa: partono quelle
     const f = await gh("GET", `rilievi/${id}.json`);
     if (!f || !f.content) continue;
     let r;
     try { r = JSON.parse(decodifica64(f.content)); } catch (e) { continue; }
-    if (!r || r.id !== id || rilievoVuoto(r)) continue;
+    if (!r || r.id !== id) continue;
+    if (r.eliminato) {                                                   // cancellato dal PC o da un altro telefono: la cancellazione vince
+      if (!(loc && loc.eliminato)) { await applicaCancellazione(id, r, f.sha, loc); if (loc) nuovi++; }
+      else { loc._sync = { ...(loc._sync || {}), sha: f.sha }; await db.salva(loc); }
+      continue;
+    }
+    if (loc && loc.eliminato) continue;                                  // cancellato qui: resta cancellato
+    if (loc && (loc.bozza || daInviare(loc))) continue;                  // qui ci sono modifiche in attesa: partono quelle
+    if (rilievoVuoto(r)) continue;
     if (loc && String(loc.modificato) >= String(r.modificato)) { loc._sync = { ...(loc._sync || {}), sha: f.sha }; await db.salva(loc); continue; }
     const foto = {};
     nomiFoto(r).forEach(n => { foto[n] = true; });                       // le foto sono già su GitHub: non si rimandano
@@ -1019,8 +1066,9 @@ $app.addEventListener("click", async e => {
       for (const ap of st.aperture || []) await eliminaFotoDi(ap);
       await eliminaFotoDi(st); rilievo.stanze.splice(s, 1); cambiato(); disegnaEditor();
     } else if (az === "elimina-rilievo") {
-      if (!confirm("Eliminare questo rilievo dal telefono?\nSe lo hai già inviato e scaricato sul PC, resta lì.")) return;
-      const id = rilievo.id; clearTimeout(timerSalva); timerSalva = null; rilievo = null; await db.elimina(id); location.hash = "";
+      if (!confirm("Eliminare questo rilievo?\n\nSparisce da questo telefono, dagli altri telefoni e dal PC (misure e foto).\nI preventivi già fatti non vengono toccati.")) return;
+      const id = rilievo.id; clearTimeout(timerSalva); timerSalva = null; rilievo = null;
+      await eliminaRilievoDefinitivo(id); location.hash = ""; sincronizzaSubito();
     } else if (az === "usa-link") {
       const c = decodificaLink(document.getElementById("cfg-link").value);
       if (!c) { avviso("Il link non è valido.", "err"); return; }
