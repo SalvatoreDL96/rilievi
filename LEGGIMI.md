@@ -64,6 +64,12 @@ Premi **Salva** e **Prova la connessione** (deve dire «Collegato a TUONOME/rili
 5. Tutto si salva da solo. A fine sopralluogo (con rete) premi **⟳ Invia al PC**.
 6. Sul computer: **Rilievi → Scarica nuovi rilievi** → apri il rilievo → **Crea preventivo dal rilievo**.
 
+## Calendario degli appuntamenti
+Nell'app c'è la scheda **Calendario** (accanto a «Rilievi»): gli appuntamenti di **montaggio**, **misure** e **altro** fatti sul computer (pagina *Calendario* del programma), con ora, cliente, telefono, indirizzo (pulsanti Mappe/Google Maps) e nota. Dal telefono si possono anche aggiungere e modificare.
+- Usa lo stesso archivio privato dei rilievi (cartella `appuntamenti/` del repository dei dati): non serve configurare altro.
+- Sul telefono si aggiorna da solo all'apertura (se c'è rete) o con **⟳ Aggiorna**; sul PC con **⟳ Sincronizza con il telefono**.
+- Vale l'ultima modifica; le cancellazioni arrivano anche all'altro dispositivo.
+
 ## Cose da sapere
 - Senza rete i rilievi restano sul telefono (badge «da inviare») e si inviano appena c'è connessione.
 - Le foto, una volta scaricate sul PC, si tolgono da GitHub (impostazione in Impostazioni → Rilievi) per non riempire l'archivio.

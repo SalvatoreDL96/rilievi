@@ -40,8 +40,13 @@ function avviso(testo, tipo, ms) {
 const db = (() => {
   let aperto;
   const apri = () => aperto || (aperto = new Promise((ok, ko) => {
-    const r = indexedDB.open("giode-rilievi", 1);
-    r.onupgradeneeded = () => { r.result.createObjectStore("rilievi", { keyPath: "id" }); r.result.createObjectStore("foto"); };
+    const r = indexedDB.open("giode-rilievi", 2);
+    r.onupgradeneeded = () => {
+      const d = r.result;
+      if (!d.objectStoreNames.contains("rilievi")) d.createObjectStore("rilievi", { keyPath: "id" });
+      if (!d.objectStoreNames.contains("foto")) d.createObjectStore("foto");
+      if (!d.objectStoreNames.contains("appuntamenti")) d.createObjectStore("appuntamenti", { keyPath: "id" });   // calendario
+    };
     r.onsuccess = () => ok(r.result);
     r.onerror = () => ko(r.error);
   }));
@@ -60,6 +65,9 @@ const db = (() => {
     leggi: id => op("rilievi", "readonly", s => s.get(id)),
     salva: r => op("rilievi", "readwrite", s => s.put(r)),
     elimina: async id => { await op("rilievi", "readwrite", s => s.delete(id)); await op("foto", "readwrite", s => s.delete(intervallo(id))); },
+    tuttiApp: () => op("appuntamenti", "readonly", s => s.getAll()),
+    leggiApp: id => op("appuntamenti", "readonly", s => s.get(id)),
+    salvaApp: a => op("appuntamenti", "readwrite", s => s.put(a)),
     salvaFoto: (chiave, blob) => op("foto", "readwrite", s => s.put(blob, chiave)),
     leggiFoto: chiave => op("foto", "readonly", s => s.get(chiave)),
     eliminaFoto: chiave => op("foto", "readwrite", s => s.delete(chiave)),
@@ -295,7 +303,7 @@ async function vistaHome() {
   const cfg = config();
   const attesa = elenco.filter(daInviare).length;
   const appenaCollegato = cfg && !standalone() && location.hash.startsWith("#cfg=");
-  $app.innerHTML = barra("Rilievi Giodè", { impostazioni: true }) + `<main>
+  $app.innerHTML = barra("Rilievi Giodè", { impostazioni: true }) + `<main>${schede("rilievi")}
     ${appenaCollegato ? `<div class="banner"><strong>Collegato ✓</strong> Per avere l'app sulla schermata Home, <strong>adesso</strong> tocca Condividi <span aria-hidden="true">⬆︎</span> → «Aggiungi alla schermata Home» da questa pagina, poi aprila dall'icona.</div>` : ""}
     ${cfg ? "" :`<div class="banner"><strong>Manca il collegamento al computer.</strong> Puoi già fare i rilievi, ma per mandarli al PC serve il collegamento: apri <a href="#/impostazioni">Impostazioni</a>.</div>`}
     ${elenco.map(r => {
@@ -310,6 +318,158 @@ async function vistaHome() {
   <div class="fondo"><div><button class="btn btn-primario" data-az="nuovo">+ Nuovo rilievo</button>
     <button class="btn" data-az="invia" ${cfg && attesa ? "" : "disabled"}>⟳ Invia al PC${attesa ? ` (${attesa})` : ""}</button></div></div>`;
   window.scrollTo(0, 0);
+}
+
+// ------------------------------------------------------------------------------------------------ calendario
+const TIPI_APP = { montaggio: "Montaggio", misure: "Misure", altro: "Altro" };
+const NOMI_MESI = ["gennaio", "febbraio", "marzo", "aprile", "maggio", "giugno", "luglio", "agosto", "settembre", "ottobre", "novembre", "dicembre"];
+let meseApp = (() => { const d = new Date(); d.setDate(1); return d; })();
+let giornoApp = oggi();
+let appuntamenti = [], sincronizzandoApp = false;
+
+const schede = attiva => `<div class="schede"><a href="#" class="${attiva === "rilievi" ? "attiva" : ""}">Rilievi</a><a href="#/calendario" class="${attiva === "calendario" ? "attiva" : ""}">Calendario</a></div>`;
+const isoData = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+const dataLunga = iso => new Date(iso + "T12:00:00").toLocaleDateString("it-IT", { weekday: "long", day: "numeric", month: "long" });
+const decodifica64 = b => new TextDecoder().decode(Uint8Array.from(atob(String(b).replace(/\s/g, "")), c => c.charCodeAt(0)));
+const appVisibili = () => appuntamenti.filter(a => !a.eliminato);
+
+function mappeApp(indirizzo) {
+  if (!indirizzo) return "";
+  const q = encodeURIComponent(indirizzo);
+  return `<a class="btn btn-piccolo" href="https://maps.apple.com/?q=${q}" target="_blank" rel="noopener">🗺 Mappe</a>
+          <a class="btn btn-piccolo" href="https://www.google.com/maps/search/?api=1&query=${q}" target="_blank" rel="noopener">📍 Google Maps</a>`;
+}
+
+async function sincronizzaAppuntamenti() {
+  const lista = (await gh("GET", "appuntamenti")) || [];
+  const remoti = new Map((Array.isArray(lista) ? lista : []).filter(v => v.name.endsWith(".json")).map(v => [v.name.slice(0, -5), v]));
+  let scaricati = 0, inviati = 0;
+  for (const [id, voce] of remoti) {                                  // 1) dal PC al telefono
+    const loc = await db.leggiApp(id);
+    if (loc && loc._sha === voce.sha) continue;
+    const file = await gh("GET", `appuntamenti/${id}.json`);
+    if (!file || !file.content) continue;
+    let r;
+    try { r = JSON.parse(decodifica64(file.content)); } catch (e) { continue; }
+    if (!r || r.id !== id) continue;
+    if (!loc || String(r.modificato) > String(loc.modificato)) { await db.salvaApp({ ...r, _sha: file.sha, _inviato: r.modificato }); scaricati++; }
+    else { loc._sha = file.sha; await db.salvaApp(loc); }             // quello del telefono è più recente: parte sotto
+  }
+  for (const loc of await db.tuttiApp()) {                            // 2) dal telefono al PC
+    if (loc._inviato === loc.modificato) continue;
+    const { _sha, _inviato, ...pulito } = loc;
+    const contenuto = aBase64Testo(JSON.stringify(pulito, null, 1));
+    let sha = _sha;
+    for (let tentativo = 0; tentativo < 2; tentativo++) {
+      try {
+        const res = await gh("PUT", `appuntamenti/${loc.id}.json`, { message: "Appuntamento " + (loc.cliente || loc.id), content: contenuto, ...(sha ? { sha } : {}) });
+        const fresco = (await db.leggiApp(loc.id)) || loc;               // se nel frattempo è stato modificato, resta da inviare
+        fresco._sha = res.content.sha;
+        if (fresco.modificato === loc.modificato) fresco._inviato = loc.modificato;
+        await db.salvaApp(fresco); inviati++; break;
+      } catch (e) {
+        if (tentativo || (e.stato !== 409 && e.stato !== 422)) throw e;
+        const es = await gh("GET", `appuntamenti/${loc.id}.json`);
+        sha = es ? es.sha : undefined;
+      }
+    }
+  }
+  return { scaricati, inviati };
+}
+
+async function aggiornaCalendario(silenzioso) {
+  if (sincronizzandoApp || !config()) return;
+  if (!inRete()) { if (!silenzioso) avviso("Nessuna connessione: il calendario si aggiorna quando c'è rete.", "err"); return; }
+  sincronizzandoApp = true;
+  try {
+    const r = await sincronizzaAppuntamenti();
+    appuntamenti = await db.tuttiApp();
+    if (!silenzioso || r.scaricati || r.inviati) avviso(r.scaricati || r.inviati ? "Calendario aggiornato ✓" : "Il calendario è già aggiornato.", "ok");
+    if (location.hash === "#/calendario") disegnaCalendario();
+  } catch (e) { if (!silenzioso) avviso(e.message || String(e), "err", 7000); }
+  sincronizzandoApp = false;
+}
+
+function rigaApp(a, conData) {
+  return `<div class="app-riga t-${esc(a.tipo)}">
+    <div class="riga"><strong>${conData ? esc(dataLunga(a.data)) + " · " : ""}${esc(a.ora || "tutto il giorno")}</strong><span class="badge">${esc(TIPI_APP[a.tipo] || a.tipo)}</span>
+      <span class="spazio"></span><button class="btn btn-piccolo" data-az="modifica-app" data-id="${esc(a.id)}">Modifica</button></div>
+    ${a.cliente ? `<div><strong>${esc(a.cliente)}</strong>${a.telefono ? ` · <a href="tel:${esc(a.telefono)}">${esc(a.telefono)}</a>` : ""}</div>` : ""}
+    ${a.indirizzo ? `<div class="small">${esc(a.indirizzo)}</div><div class="mappa-link">${mappeApp(a.indirizzo)}</div>` : ""}
+    ${a.nota ? `<div class="small muted" style="white-space:pre-wrap;margin-top:.3rem">${esc(a.nota)}</div>` : ""}</div>`;
+}
+
+function disegnaCalendario() {
+  const vis = appVisibili(), oggiIso = oggi();
+  const primo = new Date(meseApp.getFullYear(), meseApp.getMonth(), 1);
+  const inizio = new Date(primo); inizio.setDate(1 - ((primo.getDay() + 6) % 7));    // la settimana parte da lunedì
+  let celle = ["L", "M", "M", "G", "V", "S", "D"].map(g => `<div class="cal-int">${g}</div>`).join("");
+  for (let i = 0; i < 42; i++) {
+    const d = new Date(inizio); d.setDate(inizio.getDate() + i);
+    const k = isoData(d), del = vis.filter(a => a.data === k);
+    const tipi = [...new Set(del.map(a => a.tipo))];
+    celle += `<button class="cal-g ${d.getMonth() !== meseApp.getMonth() ? "fuori" : ""} ${k === oggiIso ? "oggi" : ""} ${k === giornoApp ? "scelto" : ""}" data-az="giorno-app" data-g="${k}">
+      <span>${d.getDate()}</span><span class="punti">${tipi.map(t => `<i class="ap-${esc(t)}"></i>`).join("")}</span></button>`;
+  }
+  const delGiorno = vis.filter(a => a.data === giornoApp).sort((a, b) => (a.ora || "99").localeCompare(b.ora || "99"));
+  const prossimi = vis.filter(a => a.data >= oggiIso && a.data !== giornoApp).sort((a, b) => (a.data + (a.ora || "99")).localeCompare(b.data + (b.ora || "99"))).slice(0, 6);
+  $app.innerHTML = barra("Rilievi Giodè", { impostazioni: true }) + `<main>${schede("calendario")}
+    <div class="card"><div class="riga" style="margin-bottom:.5rem"><button class="btn btn-piccolo" data-az="mese-prec" aria-label="Mese precedente">‹</button>
+      <strong class="spazio" style="text-align:center;text-transform:capitalize">${NOMI_MESI[meseApp.getMonth()]} ${meseApp.getFullYear()}</strong>
+      <button class="btn btn-piccolo" data-az="mese-succ" aria-label="Mese successivo">›</button><button class="btn btn-piccolo" data-az="oggi-app">Oggi</button></div>
+      <div class="cal-griglia">${celle}</div>
+      <div class="legenda small muted"><i class="ap-montaggio"></i> Montaggio <i class="ap-misure"></i> Misure <i class="ap-altro"></i> Altro</div></div>
+    <div class="card"><h2 style="text-transform:capitalize">${esc(dataLunga(giornoApp))}</h2>
+      ${delGiorno.map(a => rigaApp(a)).join("") || `<p class="muted" style="margin:0">Nessun appuntamento.</p>`}</div>
+    ${prossimi.length ? `<div class="card"><h2>Prossimi appuntamenti</h2>${prossimi.map(a => rigaApp(a, true)).join("")}</div>` : ""}
+    ${config() ? "" : `<div class="banner">Per vedere gli appuntamenti fatti sul computer serve il collegamento (<a href="#/impostazioni">Impostazioni</a>).</div>`}
+  </main>
+  <div class="fondo"><div><button class="btn btn-primario" data-az="nuova-app">+ Appuntamento</button>
+    <button class="btn" data-az="sync-app" ${config() ? "" : "disabled"}>⟳ Aggiorna</button></div></div>`;
+}
+
+async function vistaCalendario() {
+  rilievo = null;
+  appuntamenti = await db.tuttiApp();
+  disegnaCalendario();
+  window.scrollTo(0, 0);
+  aggiornaCalendario(true);                // in silenzio, se c'è rete: gli appuntamenti fatti al PC compaiono da soli
+}
+
+function foglioAppuntamento(esistente) {
+  const a = esistente || { tipo: "montaggio", data: giornoApp, ora: "", cliente: "", telefono: "", indirizzo: "", nota: "" };
+  const v = document.createElement("div");
+  v.className = "velo";
+  v.innerHTML = `<div class="foglio"><h2>${esistente ? "Modifica appuntamento" : "Nuovo appuntamento"} <button class="btn btn-piccolo" data-az="chiudi-foglio">Chiudi</button></h2>
+    <div class="card">
+      <label>Che cosa<select id="ap-tipo">${Object.entries(TIPI_APP).map(([k, n]) => `<option value="${k}" ${k === a.tipo ? "selected" : ""}>${n}</option>`).join("")}</select></label>
+      <div class="griglia"><label>Data<input id="ap-data" type="date" value="${esc(a.data)}"></label><label>Ora<input id="ap-ora" type="time" value="${esc(a.ora)}"></label></div>
+      <label>Cliente<input id="ap-cliente" value="${esc(a.cliente)}" autocomplete="off" autocapitalize="words"></label>
+      <div class="griglia"><label>Telefono<input id="ap-tel" type="tel" inputmode="tel" value="${esc(a.telefono)}" autocomplete="off"></label>
+        <label>Indirizzo<input id="ap-ind" value="${esc(a.indirizzo)}" autocomplete="off"></label></div>
+      <label>Nota<textarea id="ap-nota" rows="3">${esc(a.nota)}</textarea></label>
+      <div class="riga"><button class="btn btn-primario" data-az="salva-app">Salva</button>
+        ${esistente ? `<button class="btn btn-pericolo" data-az="elimina-app">Elimina</button>` : ""}</div></div></div>`;
+  v.addEventListener("click", async e => {
+    const az = e.target.dataset.az;
+    if (e.target === v || az === "chiudi-foglio") { v.remove(); return; }
+    if (az === "salva-app") {
+      const data = v.querySelector("#ap-data").value;
+      if (!data) { avviso("Scegli la data.", "err"); return; }
+      const t = adesso();
+      const nuovo = { ...(esistente || {}), id: esistente ? esistente.id : nuovoId(), tipo: v.querySelector("#ap-tipo").value, data, ora: v.querySelector("#ap-ora").value,
+        cliente: v.querySelector("#ap-cliente").value.trim(), telefono: v.querySelector("#ap-tel").value.trim(), indirizzo: v.querySelector("#ap-ind").value.trim(),
+        nota: v.querySelector("#ap-nota").value.trim(), creato: esistente ? esistente.creato : t, modificato: t, eliminato: false };
+      await db.salvaApp(nuovo);
+      giornoApp = data; meseApp = new Date(data + "T12:00:00"); meseApp.setDate(1);
+      appuntamenti = await db.tuttiApp(); v.remove(); disegnaCalendario(); avviso("Appuntamento salvato.", "ok");
+      aggiornaCalendario(true);
+    } else if (az === "elimina-app" && confirm("Eliminare questo appuntamento?")) {
+      await db.salvaApp({ ...esistente, eliminato: true, modificato: adesso() });
+      appuntamenti = await db.tuttiApp(); v.remove(); disegnaCalendario(); aggiornaCalendario(true);
+    }
+  });
+  document.body.appendChild(v);
 }
 
 function campoTesto(percorso, etichetta, valore, extra = "") {
@@ -481,7 +641,7 @@ async function inviaTutti() {
     avviso(da.length ? "Inviato ✓ Ora sul PC premi «Scarica nuovi rilievi»." : "Non c'è niente da inviare.", "ok", 5000);
   } catch (e) { avviso(e.message || String(e), "err", 8000); }
   invioInCorso = false;
-  if (!rilievo && !/^#\/(r|impostazioni)/.test(location.hash)) vistaHome();
+  if (!rilievo && !/^#\/(r|impostazioni|calendario)/.test(location.hash)) vistaHome();
 }
 
 // ------------------------------------------------------------------------------------------------ eventi
@@ -525,6 +685,13 @@ $app.addEventListener("click", async e => {
     else if (az === "impostazioni") location.hash = "#/impostazioni";
     else if (az === "nuovo") { const r = nuovoRilievo(); await db.salva(r); location.hash = "#/r/" + r.id; }
     else if (az === "invia") await inviaTutti();
+    else if (az === "giorno-app") { giornoApp = b.dataset.g; const d = new Date(giornoApp + "T12:00:00"); if (d.getMonth() !== meseApp.getMonth()) { meseApp = new Date(d.getFullYear(), d.getMonth(), 1); } disegnaCalendario(); }
+    else if (az === "mese-prec") { meseApp = new Date(meseApp.getFullYear(), meseApp.getMonth() - 1, 1); disegnaCalendario(); }
+    else if (az === "mese-succ") { meseApp = new Date(meseApp.getFullYear(), meseApp.getMonth() + 1, 1); disegnaCalendario(); }
+    else if (az === "oggi-app") { giornoApp = oggi(); meseApp = new Date(); meseApp.setDate(1); disegnaCalendario(); }
+    else if (az === "nuova-app") foglioAppuntamento(null);
+    else if (az === "modifica-app") foglioAppuntamento(appuntamenti.find(x => x.id === b.dataset.id));
+    else if (az === "sync-app") await aggiornaCalendario(false);
     else if (az === "fatto") { await salvaOra(); location.hash = ""; }
     else if (az === "posizione") await usaPosizione();
     else if (az === "cerca") await cercaIndirizzo();
@@ -567,7 +734,8 @@ async function vai() {
     rilievo = r; rilievo.stanze = rilievo.stanze || []; rilievo.foto = rilievo.foto || [];
     rilievo.cliente = rilievo.cliente || {}; rilievo.indirizzo = rilievo.indirizzo || { testo: "", lat: null, lon: null };
     disegnaEditor();
-  } else if (h.startsWith("#/impostazioni")) vistaImpostazioni();
+  } else if (h.startsWith("#/calendario")) await vistaCalendario();
+  else if (h.startsWith("#/impostazioni")) vistaImpostazioni();
   else await vistaHome();
 }
 addEventListener("hashchange", () => { if (location.hash.startsWith("#cfg=")) importaDaIndirizzo(); vai().catch(e => avviso(e.message, "err")); });

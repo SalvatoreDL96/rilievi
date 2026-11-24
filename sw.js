@@ -1,6 +1,6 @@
 // Fa funzionare il sito anche senza rete (dai clienti il segnale spesso manca): i file del sito si tengono in memoria.
 // Le chiamate a GitHub e alle mappe non passano di qui: vanno sempre direttamente in rete.
-const VERSIONE = "rilievi-v1";
+const VERSIONE = "rilievi-v2";
 const FILE = ["./", "index.html", "app.js", "stile.css", "manifest.webmanifest", "icone/icona-180.png", "icone/icona-192.png", "icone/icona-512.png"];
 
 self.addEventListener("install", e => {
@@ -23,3 +23,4 @@ self.addEventListener("fetch", e => {
     return (await dallaRete) || (e.request.mode === "navigate" ? cache.match("index.html") : Response.error());
   }));
 });
+

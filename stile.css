@@ -111,3 +111,24 @@ input[type=file] { display: none; }
 .avviso-ok { background: #17703c; }
 .avviso-err { background: #a32424; }
 .mappa-link { display: flex; gap: .5rem; flex-wrap: wrap; margin-top: .3rem; }
+
+/* schede Rilievi / Calendario */
+.schede { display: flex; gap: .4rem; margin-bottom: .8rem; }
+.schede a { flex: 1; text-align: center; padding: .6rem; border-radius: 12px; background: #fff; border: 1px solid var(--line); color: var(--ink); text-decoration: none; font-weight: 600; }
+.schede a.attiva { background: var(--brand); border-color: var(--brand); color: #fff; }
+
+/* calendario */
+.cal-griglia { display: grid; grid-template-columns: repeat(7, 1fr); gap: 3px; }
+.cal-int { text-align: center; font-size: .72rem; font-weight: 700; color: var(--muted); padding: .1rem 0; }
+.cal-g { display: flex; flex-direction: column; align-items: center; justify-content: flex-start; gap: 3px; min-height: 48px; padding: 5px 0 3px; border: 1px solid var(--line); border-radius: 10px;
+  background: #fff; font: inherit; font-size: .95rem; color: var(--ink); }
+.cal-g.fuori { opacity: .45; background: #f6f3ee; }
+.cal-g.oggi > span:first-child { background: var(--brand); color: #fff; border-radius: 999px; min-width: 1.7em; font-weight: 700; }
+.cal-g.scelto { outline: 2px solid var(--brand); outline-offset: -2px; }
+.punti { display: flex; gap: 2px; min-height: 8px; }
+.punti i, .legenda i { display: inline-block; width: 8px; height: 8px; border-radius: 50%; }
+.legenda { margin-top: .5rem; display: flex; gap: .8rem; align-items: center; }
+.ap-montaggio { background: #2e8b57; } .ap-misure { background: #2f6fbf; } .ap-altro { background: #8a7b6a; }
+.app-riga { border-left: 5px solid #8a7b6a; border-radius: 8px; padding: .5rem .7rem; margin-bottom: .55rem; background: #faf8f5; }
+.app-riga.t-montaggio { border-color: #2e8b57; } .app-riga.t-misure { border-color: #2f6fbf; } .app-riga.t-altro { border-color: #8a7b6a; }
+
