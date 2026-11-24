@@ -18,7 +18,7 @@ const MISURE = [["larghezza", "Larghezza"], ["altezza_sx", "Altezza sinistra"], 
 const misureDi = a => (a.altezza !== undefined && a.altezza !== "") ? [MISURE[0], ["altezza", "Altezza (vecchio rilievo)"], ...MISURE.slice(1)] : MISURE;
 const CHIAVE_CONFIG = "giode_rilievi_cfg";
 const API = "https://api.github.com";
-const VERSIONE_APP = "5 (24/11/2026)";   // da cambiare insieme a VERSIONE in sw.js a ogni pubblicazione
+const VERSIONE_APP = "6 (24/11/2026)";   // da cambiare insieme a VERSIONE in sw.js a ogni pubblicazione
 
 const $app = document.getElementById("app");
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -51,7 +51,11 @@ const db = (() => {
       if (!d.objectStoreNames.contains("foto")) d.createObjectStore("foto");
       if (!d.objectStoreNames.contains("appuntamenti")) d.createObjectStore("appuntamenti", { keyPath: "id" });   // calendario
     };
-    r.onsuccess = () => ok(r.result);
+    r.onblocked = () => avviso("Chiudi le altre schede o finestre dell'app per completare l'aggiornamento.", "err", 9000);
+    r.onsuccess = () => {
+      r.result.onversionchange = () => { r.result.close(); location.reload(); };   // un'altra versione dell'app apre l'archivio: ci si fa da parte
+      ok(r.result);
+    };
     r.onerror = () => ko(r.error);
   }));
   async function op(archivio, modo, fn) {
@@ -310,7 +314,8 @@ function barra(titolo, { indietro, impostazioni, stato } = {}) {
     ${impostazioni ? `<button data-az="impostazioni" aria-label="Impostazioni">⚙︎</button>` : ""}</header>`;
 }
 
-async function vistaHome() {
+async function vistaHome(conservaScroll) {
+  const scrollPrima = window.scrollY;
   rilievo = null;
   const elenco = (await db.tutti()).sort((a, b) => (b.data + b.modificato).localeCompare(a.data + a.modificato));
   const cfg = config();
@@ -330,7 +335,7 @@ async function vistaHome() {
   </main>
   <div class="fondo"><div><button class="btn btn-primario" data-az="nuovo">+ Nuovo rilievo</button>
     <button class="btn" data-az="invia" ${cfg && attesa ? "" : "disabled"}>⟳ Invia al PC${attesa ? ` (${attesa})` : ""}</button></div></div>`;
-  window.scrollTo(0, 0);
+  window.scrollTo(0, conservaScroll ? scrollPrima : 0);
 }
 
 // ------------------------------------------------------------------------------------------------ clienti del PC
@@ -405,7 +410,8 @@ let meseApp = (() => { const d = new Date(); d.setDate(1); return d; })();
 let giornoApp = oggi();
 let appuntamenti = [], sincronizzandoApp = false;
 
-const schede = attiva => `<div class="schede"><a href="#" class="${attiva === "rilievi" ? "attiva" : ""}">Rilievi</a><a href="#/calendario" class="${attiva === "calendario" ? "attiva" : ""}">Calendario</a></div>`;
+const schede = attiva => `<div class="schede"><a href="#" class="${attiva === "rilievi" ? "attiva" : ""}">Rilievi</a><a href="#/calendario" class="${attiva === "calendario" ? "attiva" : ""}">Calendario</a></div>
+  <div class="small muted" id="riga-sync" style="margin:-.4rem .2rem .7rem">${testoStatoSync()}</div>`;
 const isoData = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 const dataLunga = iso => new Date(iso + "T12:00:00").toLocaleDateString("it-IT", { weekday: "long", day: "numeric", month: "long" });
 const decodifica64 = b => new TextDecoder().decode(Uint8Array.from(atob(String(b).replace(/\s/g, "")), c => c.charCodeAt(0)));
@@ -456,7 +462,7 @@ async function sincronizzaAppuntamenti() {
 }
 
 async function aggiornaCalendario(silenzioso) {
-  if (sincronizzandoApp || !config()) return;
+  if (sincronizzandoApp || sincronizzandoTutto || !config()) return;
   if (!inRete()) { if (!silenzioso) avviso("Nessuna connessione: il calendario si aggiorna quando c'è rete.", "err"); return; }
   sincronizzandoApp = true;
   try {
@@ -484,7 +490,7 @@ async function foglioDettaglio(a) {
     <div class="card">
       <div class="muted small" style="text-transform:capitalize">${esc(dataLunga(a.data))}</div>
       ${a.cliente ? `<div style="font-size:1.15rem;font-weight:700;margin:.2rem 0">${esc(a.cliente)}</div>` : ""}
-      ${a.telefono ? `<a class="btn btn-piccolo" href="tel:${esc(a.telefono)}">📞 ${esc(a.telefono)}</a>` : ""}
+      ${a.telefono ? `<a class="btn btn-piccolo btn-primario" href="tel:${esc(a.telefono)}">📞 Chiama ${esc(a.telefono)}</a>` : ""}
       ${a.indirizzo ? `<p style="margin:.6rem 0 .2rem">${esc(a.indirizzo)}</p>` : ""}
       ${dove ? `<iframe class="mappa-app" loading="lazy" referrerpolicy="no-referrer-when-downgrade" title="Mappa"
           src="https://maps.google.com/maps?q=${q}&z=16&output=embed"></iframe>
@@ -505,11 +511,13 @@ async function foglioDettaglio(a) {
 }
 
 function rigaApp(a, conData) {
+  const azioni = (a.telefono ? `<a class="btn btn-piccolo btn-primario" href="tel:${esc(a.telefono)}">📞 Chiama</a>` : "") + (a.indirizzo ? mappeApp(a.indirizzo) : "");
   return `<div class="app-riga t-${esc(a.tipo)}" data-az="dettaglio-app" data-id="${esc(a.id)}" style="cursor:pointer">
     <div class="riga"><strong>${conData ? esc(dataLunga(a.data)) + " · " : ""}${esc(a.ora || "tutto il giorno")}</strong><span class="badge">${esc(TIPI_APP[a.tipo] || a.tipo)}</span>
       <span class="spazio"></span><button class="btn btn-piccolo" data-az="modifica-app" data-id="${esc(a.id)}">Modifica</button></div>
     ${a.cliente ? `<div><strong>${esc(a.cliente)}</strong>${a.telefono ? ` · <a href="tel:${esc(a.telefono)}">${esc(a.telefono)}</a>` : ""}</div>` : ""}
-    ${a.indirizzo ? `<div class="small">${esc(a.indirizzo)}</div><div class="mappa-link">${mappeApp(a.indirizzo)}</div>` : ""}
+    ${a.indirizzo ? `<div class="small">${esc(a.indirizzo)}</div>` : ""}
+    ${azioni ? `<div class="mappa-link">${azioni}</div>` : ""}
     ${a.nota ? `<div class="small muted" style="white-space:pre-wrap;margin-top:.3rem">${esc(a.nota)}</div>` : ""}</div>`;
 }
 
@@ -547,7 +555,7 @@ async function vistaCalendario() {
   appuntamenti = await db.tuttiApp();
   disegnaCalendario();
   window.scrollTo(0, 0);
-  aggiornaCalendario(true);                // in silenzio, se c'è rete: gli appuntamenti fatti al PC compaiono da soli
+  sincronizzaSubito();                      // in silenzio, se c'è rete: gli appuntamenti fatti al PC compaiono da soli
 }
 
 function foglioAppuntamento(esistente) {
@@ -592,10 +600,10 @@ function foglioAppuntamento(esistente) {
       await db.salvaApp(nuovo);
       giornoApp = data; meseApp = new Date(data + "T12:00:00"); meseApp.setDate(1);
       appuntamenti = await db.tuttiApp(); v.remove(); disegnaCalendario(); avviso("Appuntamento salvato.", "ok");
-      aggiornaCalendario(true);
+      sincronizzaSubito();
     } else if (az === "elimina-app" && confirm("Eliminare questo appuntamento?")) {
       await db.salvaApp({ ...esistente, eliminato: true, modificato: adesso() });
-      appuntamenti = await db.tuttiApp(); v.remove(); disegnaCalendario(); aggiornaCalendario(true);
+      appuntamenti = await db.tuttiApp(); v.remove(); disegnaCalendario(); sincronizzaSubito();
     }
   });
   document.body.appendChild(v);
@@ -763,6 +771,7 @@ async function inviaTutti() {
   if (invioInCorso) return;
   if (!config()) { avviso("Prima collega il telefono al computer (Impostazioni).", "err"); return; }
   if (!inRete()) { avviso("Nessuna connessione: riprova quando c'è rete.", "err"); return; }
+  if (sincronizzandoTutto) { avviso("Sto già sincronizzando: riprova tra un attimo."); return; }
   invioInCorso = true;
   const bottone = document.querySelector('[data-az="invia"]');
   if (bottone) bottone.disabled = true;
@@ -778,6 +787,58 @@ async function inviaTutti() {
   invioInCorso = false;
   if (!rilievo && !/^#\/(r|impostazioni|calendario)/.test(location.hash)) vistaHome();
 }
+
+// ------------------------------------------------------------------------------------------------ sincronizzazione automatica
+// Ogni minuto (e quando l'app torna in primo piano, torna la rete, o si finisce una modifica) l'app aggiorna da sola
+// l'elenco clienti, il calendario (nei due sensi) e manda i rilievi da inviare. Non serve premere niente.
+// Nota: se l'app è chiusa o in secondo piano l'iPhone la sospende: la sincronizzazione riparte appena la riapri.
+let sincronizzandoTutto = false, ultimaSync = "", erroreSync = "", timerSubito = null;
+const firmaClienti = () => clientiPC.map(c => [c.id, c.nome, c.telefono, c.email, c.indirizzo, c.citta].join("|")).join("§");
+
+function testoStatoSync() {
+  if (!config()) return "Non collegato al computer (Impostazioni).";
+  if (erroreSync) return "⚠ Non sincronizzato: " + (inRete() ? erroreSync : "manca la rete") + (ultimaSync ? ` (ultimo aggiornamento ${ultimaSync})` : "");
+  return ultimaSync ? `⟳ Sincronizzato alle ${ultimaSync} · si aggiorna da solo` : "⟳ Sincronizzazione in corso…";
+}
+function mostraStatoSync() { const el = document.getElementById("riga-sync"); if (el) el.textContent = testoStatoSync(); }
+
+function aggiornaVistaDopoSync() {
+  if (document.querySelector(".velo, .visore")) return;   // si sta usando una scheda: non si cambia niente sotto le dita
+  const h = location.hash;
+  if (h === "#/calendario") disegnaCalendario();
+  else if (!rilievo && !/^#\/(r|impostazioni)/.test(h)) vistaHome(true);
+}
+
+async function sincronizzaTutto(silenzioso = true) {
+  if (sincronizzandoTutto || invioInCorso || sincronizzandoApp || !config()) return;
+  if (!inRete()) { mostraStatoSync(); return; }
+  sincronizzandoTutto = true;
+  let cambiato = false;
+  try {
+    const prima = firmaClienti();
+    await aggiornaClienti();                                       // clienti del PC (quelli eliminati spariscono)
+    if (firmaClienti() !== prima) cambiato = true;
+    const a = await sincronizzaAppuntamenti();                      // calendario: dal PC al telefono e viceversa
+    if (a.scaricati || a.inviati) cambiato = true;
+    const da = (await db.tutti()).filter(r => daInviare(r) && !(rilievo && rilievo.id === r.id));   // il rilievo aperto parte quando lo si chiude
+    for (const r of da) { await inviaRilievo(r.id, () => {}); cambiato = true; }
+    appuntamenti = await db.tuttiApp();
+    const t = new Date();
+    ultimaSync = `${String(t.getHours()).padStart(2, "0")}:${String(t.getMinutes()).padStart(2, "0")}`;
+    erroreSync = "";
+  } catch (e) { erroreSync = e.message || String(e); }
+  sincronizzandoTutto = false;
+  if (cambiato) aggiornaVistaDopoSync();
+  mostraStatoSync();
+  if (!silenzioso) avviso(erroreSync || "Sincronizzato ✓", erroreSync ? "err" : "ok", erroreSync ? 7000 : 2500);
+}
+// dopo una modifica (appuntamento salvato, rilievo chiuso) si manda quasi subito, senza aspettare il minuto
+function sincronizzaSubito() { clearTimeout(timerSubito); timerSubito = setTimeout(() => sincronizzaTutto(true), 1500); }
+
+setInterval(() => { if (document.visibilityState === "visible") sincronizzaTutto(true); }, 60000);
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") setTimeout(() => sincronizzaTutto(true), 600); });
+addEventListener("online", () => sincronizzaTutto(true));
+setTimeout(() => sincronizzaTutto(true), 2500);
 
 // ------------------------------------------------------------------------------------------------ eventi
 $app.addEventListener("input", e => {
@@ -833,7 +894,7 @@ $app.addEventListener("click", async e => {
     else if (az === "nuova-app") foglioAppuntamento(null);
     else if (az === "modifica-app") foglioAppuntamento(appuntamenti.find(x => x.id === b.dataset.id));
     else if (az === "dettaglio-app") await foglioDettaglio(appuntamenti.find(x => x.id === b.dataset.id));
-    else if (az === "sync-app") await aggiornaCalendario(false);
+    else if (az === "sync-app") { if (!inRete()) avviso("Nessuna connessione: si aggiorna da solo appena c'è rete.", "err"); else await sincronizzaTutto(false); }
     else if (az === "aggiorna-app") await aggiornaApp();
     else if (az === "fatto") { await salvaOra(); location.hash = ""; }
     else if (az === "posizione") await usaPosizione();
@@ -873,6 +934,7 @@ $app.addEventListener("click", async e => {
 async function vai() {
   const h = location.hash;
   const m = h.match(/^#\/r\/([\w\-]+)/);
+  if (rilievo && !m) { if (timerSalva) await salvaOra(); sincronizzaSubito(); }   // si esce da un rilievo: si manda subito al PC
   if (m) {
     const r = await db.leggi(m[1]);
     if (!r) { location.hash = ""; return; }
@@ -884,7 +946,6 @@ async function vai() {
   else await vistaHome();
 }
 addEventListener("hashchange", () => { if (location.hash.startsWith("#cfg=")) importaDaIndirizzo(); vai().catch(e => avviso(e.message, "err")); });
-addEventListener("online", () => { if (!rilievo && config() && !invioInCorso) db.tutti().then(l => { if (l.some(daInviare)) avviso("Torna la rete: premi «Invia al PC».", "", 4000); }); });
 
 importaDaIndirizzo();
 caricaClientiLocali().then(() => aggiornaClienti()).catch(() => {});   // elenco clienti del PC: quelli già scaricati subito, poi l'aggiornamento
