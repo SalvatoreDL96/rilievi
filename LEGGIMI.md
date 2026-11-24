@@ -57,9 +57,9 @@ Premi **Salva** e **Prova la connessione** (deve dire «Collegato a TUONOME/rili
 > Se il telefono va perso o la chiave viene condivisa per errore: su GitHub, nelle impostazioni dei token, **Revoke**, e crea una nuova chiave.
 
 ## Uso dal cliente
-1. **+ Nuovo rilievo** → nome, telefono, email.
+1. **+ Nuovo rilievo** → **👥 Scegli dai clienti del PC** (l'elenco arriva dal computer: premi «Sincronizza con il telefono» nel Calendario del programma, o «Scarica nuovi rilievi», per aggiornarlo), così non si creano doppioni. Per un cliente nuovo scrivi nome, telefono ed email: sul PC si aggiunge con «Aggiungi ai clienti». Se mentre scrivi il nome c'è già sul PC, compare il suggerimento «già sul PC».
 2. **Indirizzo**: scrivilo, oppure **📍 Usa la mia posizione** (compila via e città) e **🔎 Trova sulla mappa**. I pulsanti **Mappe** e **Google Maps** aprono l'indirizzo per la navigazione.
-3. **+ Aggiungi stanza** (Soggiorno, Camera…) e per ogni stanza le aperture: tipo, **larghezza, altezza, altezza del davanzale, soffitto, spazi laterali** (in cm), installazione, tenda desiderata, note.
+3. **+ Aggiungi stanza** (Soggiorno, Camera…) e per ogni stanza le aperture: tipo, **larghezza, altezza sinistra, altezza destra, altezza del davanzale, altezza del soffitto** (in cm), installazione, tenda desiderata, note. Sul PC, per i m² della tenda, vale l'altezza più alta tra sinistra e destra.
 4. **📷 Scatta** o **🖼 Dalla libreria** per le foto di ogni apertura, della stanza o generali (si riducono da sole: poche centinaia di KB l'una).
 5. Tutto si salva da solo. A fine sopralluogo (con rete) premi **⟳ Invia al PC**.
 6. Sul computer: **Rilievi → Scarica nuovi rilievi** → apri il rilievo → **Crea preventivo dal rilievo**.

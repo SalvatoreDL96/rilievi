@@ -12,10 +12,13 @@ const CATEGORIE = {
   "Bagno": ["Bagno", "Bagno di servizio"],
   "Altri ambienti": ["Lavanderia", "Taverna", "Mansarda", "Terrazzo/Balcone", "Altro"],
 };
-const MISURE = [["larghezza", "Larghezza"], ["altezza", "Altezza"], ["altezza_davanzale", "Altezza davanzale"],
-                ["altezza_soffitto", "Altezza soffitto"], ["spazio_sx", "Spazio a sinistra"], ["spazio_dx", "Spazio a destra"]];
+const MISURE = [["larghezza", "Larghezza"], ["altezza_sx", "Altezza sinistra"], ["altezza_dx", "Altezza destra"],
+                ["altezza_davanzale", "Altezza davanzale"], ["altezza_soffitto", "Altezza soffitto"]];
+// nei rilievi fatti prima c'era una sola «Altezza»: se è compilata si continua a mostrarla
+const misureDi = a => (a.altezza !== undefined && a.altezza !== "") ? [MISURE[0], ["altezza", "Altezza (vecchio rilievo)"], ...MISURE.slice(1)] : MISURE;
 const CHIAVE_CONFIG = "giode_rilievi_cfg";
 const API = "https://api.github.com";
+const VERSIONE_APP = "5 (24/11/2026)";   // da cambiare insieme a VERSIONE in sw.js a ogni pubblicazione
 
 const $app = document.getElementById("app");
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -40,9 +43,10 @@ function avviso(testo, tipo, ms) {
 const db = (() => {
   let aperto;
   const apri = () => aperto || (aperto = new Promise((ok, ko) => {
-    const r = indexedDB.open("giode-rilievi", 2);
+    const r = indexedDB.open("giode-rilievi", 3);
     r.onupgradeneeded = () => {
       const d = r.result;
+      if (!d.objectStoreNames.contains("clienti")) d.createObjectStore("clienti", { keyPath: "id" });   // elenco clienti del PC
       if (!d.objectStoreNames.contains("rilievi")) d.createObjectStore("rilievi", { keyPath: "id" });
       if (!d.objectStoreNames.contains("foto")) d.createObjectStore("foto");
       if (!d.objectStoreNames.contains("appuntamenti")) d.createObjectStore("appuntamenti", { keyPath: "id" });   // calendario
@@ -65,6 +69,15 @@ const db = (() => {
     leggi: id => op("rilievi", "readonly", s => s.get(id)),
     salva: r => op("rilievi", "readwrite", s => s.put(r)),
     elimina: async id => { await op("rilievi", "readwrite", s => s.delete(id)); await op("foto", "readwrite", s => s.delete(intervallo(id))); },
+    tuttiClienti: () => op("clienti", "readonly", s => s.getAll()),
+    sostituisciClienti: async lista => {
+      const d = await apri();
+      return new Promise((ok, ko) => {
+        const t = d.transaction("clienti", "readwrite"), s = t.objectStore("clienti");
+        s.clear(); lista.forEach(c => s.put(c));
+        t.oncomplete = () => ok(); t.onerror = t.onabort = () => ko(t.error);
+      });
+    },
     tuttiApp: () => op("appuntamenti", "readonly", s => s.getAll()),
     leggiApp: id => op("appuntamenti", "readonly", s => s.get(id)),
     salvaApp: a => op("appuntamenti", "readwrite", s => s.put(a)),
@@ -138,7 +151,7 @@ function nuovoRilievo() {
   return { id: nuovoId(), versione: 1, data: oggi(), creato: t, modificato: t, cliente: { nome: "", telefono: "", email: "" },
            indirizzo: { testo: "", lat: null, lon: null }, note: "", stanze: [], foto: [], _sync: { inviato: "", foto: {} } };
 }
-const nuovaApertura = () => ({ tipo: "Finestra", larghezza: "", altezza: "", altezza_davanzale: "", altezza_soffitto: "", spazio_sx: "", spazio_dx: "",
+const nuovaApertura = () => ({ tipo: "Finestra", larghezza: "", altezza_sx: "", altezza_dx: "", altezza_davanzale: "", altezza_soffitto: "",
                                installazione: "", tenda_desiderata: "", note: "", foto: [] });
 
 function nomeStanzaUnivoco(nome, esistenti) {
@@ -320,6 +333,71 @@ async function vistaHome() {
   window.scrollTo(0, 0);
 }
 
+// ------------------------------------------------------------------------------------------------ clienti del PC
+// L'elenco dei clienti arriva dal computer (file clienti.json nell'archivio privato) e si sceglie da qui: così non si creano doppioni.
+let clientiPC = [];
+const normNome = s => String(s || "").trim().replace(/\s+/g, " ").toLowerCase();
+
+async function aggiornaClienti() {
+  if (!config() || !inRete()) return false;
+  try {
+    const f = await gh("GET", "clienti.json");
+    if (!f || !f.content) return false;
+    const dati = JSON.parse(decodifica64(f.content));
+    if (!Array.isArray(dati.clienti)) return false;
+    await db.sostituisciClienti(dati.clienti.filter(c => c && c.id && c.nome));
+    clientiPC = (await db.tuttiClienti()).sort((a, b) => a.nome.localeCompare(b.nome, "it"));
+    return true;
+  } catch (e) { return false; }   // senza rete o file non ancora pubblicato restano i clienti già scaricati
+}
+async function caricaClientiLocali() { clientiPC = (await db.tuttiClienti()).sort((a, b) => a.nome.localeCompare(b.nome, "it")); }
+
+function indirizzoCliente(c) { return [c.indirizzo, c.citta].filter(Boolean).join(" "); }
+
+// suggerimenti sotto il nome: se il cliente c'è già sul PC si propone di usarlo (invece di scriverne uno nuovo)
+function suggerimentiCliente() {
+  if (!rilievo) return "";
+  if (rilievo.cliente_id && clientiPC.some(c => c.id === rilievo.cliente_id)) return `<span class="badge badge-ok">✓ Cliente del PC</span>`;
+  const n = normNome(rilievo.cliente && rilievo.cliente.nome);
+  if (n.length < 2) return "";
+  const simili = clientiPC.filter(c => normNome(c.nome).includes(n)).slice(0, 3);
+  return simili.map(c => `<button class="btn btn-piccolo" style="margin:0 .3rem .3rem 0" data-az="usa-cliente" data-id="${esc(c.id)}">Usa «${esc(c.nome)}» (già sul PC)</button>`).join("");
+}
+
+function applicaCliente(c) {
+  if (!c || !rilievo) return;
+  rilievo.cliente = { ...rilievo.cliente, nome: c.nome, telefono: c.telefono || rilievo.cliente.telefono || "", email: c.email || rilievo.cliente.email || "" };
+  rilievo.cliente_id = c.id;
+  if (!rilievo.indirizzo.testo && indirizzoCliente(c)) { rilievo.indirizzo = { testo: indirizzoCliente(c), lat: null, lon: null }; }
+  cambiato(); disegnaEditor(); avviso("Cliente «" + c.nome + "» collegato al PC.", "ok");
+}
+
+function foglioClienti(onScegli) {
+  const v = document.createElement("div");
+  v.className = "velo";
+  v.innerHTML = `<div class="foglio"><h2>Clienti del computer <button class="btn btn-piccolo" data-az="chiudi-foglio">Chiudi</button></h2>
+    <input id="cerca-cliente" type="search" placeholder="Cerca per nome, telefono o indirizzo" autocomplete="off" style="margin-bottom:.6rem">
+    <div id="elenco-clienti"></div><p class="muted small" id="nota-clienti"></p></div>`;
+  const disegna = () => {
+    const q = normNome(v.querySelector("#cerca-cliente").value);
+    const lista = clientiPC.filter(c => !q || normNome([c.nome, c.telefono, c.indirizzo, c.citta].join(" ")).includes(q));
+    v.querySelector("#elenco-clienti").innerHTML = lista.slice(0, 60).map(c => `<button class="cliente-voce" data-id="${esc(c.id)}"><strong>${esc(c.nome)}</strong>
+      <span class="small muted">${esc([c.telefono, indirizzoCliente(c)].filter(Boolean).join(" · "))}</span></button>`).join("");
+    v.querySelector("#nota-clienti").textContent = clientiPC.length
+      ? (lista.length > 60 ? "Scrivi per restringere l'elenco." : lista.length ? "" : "Nessun cliente trovato: scrivi il nome a mano nel rilievo e verrà aggiunto sul PC.")
+      : "L'elenco è vuoto. Sul computer premi «Sincronizza con il telefono» nel Calendario (o «Scarica nuovi rilievi»): poi qui compaiono i clienti.";
+  };
+  v.addEventListener("click", e => {
+    if (e.target === v || e.target.dataset.az === "chiudi-foglio") { v.remove(); return; }
+    const voce = e.target.closest(".cliente-voce");
+    if (voce) { const c = clientiPC.find(x => x.id === voce.dataset.id); v.remove(); onScegli(c); }
+  });
+  v.addEventListener("input", disegna);
+  document.body.appendChild(v);
+  disegna();
+  aggiornaClienti().then(ok => { if (ok && v.isConnected) disegna(); });   // se c'è rete, si aggiorna l'elenco
+}
+
 // ------------------------------------------------------------------------------------------------ calendario
 const TIPI_APP = { montaggio: "Montaggio", misure: "Misure", altro: "Altro" };
 const NOMI_MESI = ["gennaio", "febbraio", "marzo", "aprile", "maggio", "giugno", "luglio", "agosto", "settembre", "ottobre", "novembre", "dicembre"];
@@ -390,8 +468,44 @@ async function aggiornaCalendario(silenzioso) {
   sincronizzandoApp = false;
 }
 
+// scheda dell'appuntamento: dati del cliente, mappa con la sua posizione, indicazioni stradali
+async function foglioDettaglio(a) {
+  if (!a) return;
+  // se per questo cliente c'è un rilievo con la posizione presa sul posto, si usa quella (più precisa dell'indirizzo scritto)
+  const nome = (a.cliente || "").trim().toLowerCase();
+  const rilievi = nome ? await db.tutti() : [];
+  const r = rilievi.find(x => ((x.cliente && x.cliente.nome) || "").trim().toLowerCase() === nome && x.indirizzo && x.indirizzo.lat != null);
+  const coordinate = r ? `${r.indirizzo.lat},${r.indirizzo.lon}` : "";
+  const dove = coordinate || a.indirizzo || "";
+  const q = encodeURIComponent(dove);
+  const v = document.createElement("div");
+  v.className = "velo";
+  v.innerHTML = `<div class="foglio"><h2><span>${esc(TIPI_APP[a.tipo] || a.tipo)} · ${esc(a.ora || "tutto il giorno")}</span> <button class="btn btn-piccolo" data-az="chiudi-foglio">Chiudi</button></h2>
+    <div class="card">
+      <div class="muted small" style="text-transform:capitalize">${esc(dataLunga(a.data))}</div>
+      ${a.cliente ? `<div style="font-size:1.15rem;font-weight:700;margin:.2rem 0">${esc(a.cliente)}</div>` : ""}
+      ${a.telefono ? `<a class="btn btn-piccolo" href="tel:${esc(a.telefono)}">📞 ${esc(a.telefono)}</a>` : ""}
+      ${a.indirizzo ? `<p style="margin:.6rem 0 .2rem">${esc(a.indirizzo)}</p>` : ""}
+      ${dove ? `<iframe class="mappa-app" loading="lazy" referrerpolicy="no-referrer-when-downgrade" title="Mappa"
+          src="https://maps.google.com/maps?q=${q}&z=16&output=embed"></iframe>
+        <p class="muted small" style="margin:.3rem 0 .5rem">${coordinate ? "📍 Posizione presa sul posto con il rilievo. " : ""}La mappa ha bisogno della rete.</p>
+        <div class="mappa-link">
+          <a class="btn btn-piccolo btn-primario" href="https://www.google.com/maps/dir/?api=1&destination=${q}" target="_blank" rel="noopener">🧭 Indicazioni</a>
+          <a class="btn btn-piccolo" href="https://maps.apple.com/?daddr=${q}&dirflg=d" target="_blank" rel="noopener">🗺 Mappe</a>
+          <a class="btn btn-piccolo" href="https://www.google.com/maps/search/?api=1&query=${q}" target="_blank" rel="noopener">📍 Google Maps</a></div>`
+        : `<p class="muted">Nessun indirizzo: aggiungilo con «Modifica» per vedere la mappa.</p>`}
+      ${a.nota ? `<p style="white-space:pre-wrap;margin:.8rem 0 0"><strong>Nota:</strong> ${esc(a.nota)}</p>` : ""}
+      <div class="riga" style="margin-top:.9rem"><button class="btn btn-primario" data-az="modifica-da-scheda">Modifica</button></div>
+    </div></div>`;
+  v.addEventListener("click", e => {
+    if (e.target === v || e.target.dataset.az === "chiudi-foglio") v.remove();
+    else if (e.target.dataset.az === "modifica-da-scheda") { v.remove(); foglioAppuntamento(a); }
+  });
+  document.body.appendChild(v);
+}
+
 function rigaApp(a, conData) {
-  return `<div class="app-riga t-${esc(a.tipo)}">
+  return `<div class="app-riga t-${esc(a.tipo)}" data-az="dettaglio-app" data-id="${esc(a.id)}" style="cursor:pointer">
     <div class="riga"><strong>${conData ? esc(dataLunga(a.data)) + " · " : ""}${esc(a.ora || "tutto il giorno")}</strong><span class="badge">${esc(TIPI_APP[a.tipo] || a.tipo)}</span>
       <span class="spazio"></span><button class="btn btn-piccolo" data-az="modifica-app" data-id="${esc(a.id)}">Modifica</button></div>
     ${a.cliente ? `<div><strong>${esc(a.cliente)}</strong>${a.telefono ? ` · <a href="tel:${esc(a.telefono)}">${esc(a.telefono)}</a>` : ""}</div>` : ""}
@@ -444,22 +558,37 @@ function foglioAppuntamento(esistente) {
     <div class="card">
       <label>Che cosa<select id="ap-tipo">${Object.entries(TIPI_APP).map(([k, n]) => `<option value="${k}" ${k === a.tipo ? "selected" : ""}>${n}</option>`).join("")}</select></label>
       <div class="griglia"><label>Data<input id="ap-data" type="date" value="${esc(a.data)}"></label><label>Ora<input id="ap-ora" type="time" value="${esc(a.ora)}"></label></div>
+      <button class="btn btn-piccolo" data-az="scegli-cliente-app" style="margin-bottom:.6rem">👥 Scegli dai clienti del PC</button>
       <label>Cliente<input id="ap-cliente" value="${esc(a.cliente)}" autocomplete="off" autocapitalize="words"></label>
       <div class="griglia"><label>Telefono<input id="ap-tel" type="tel" inputmode="tel" value="${esc(a.telefono)}" autocomplete="off"></label>
         <label>Indirizzo<input id="ap-ind" value="${esc(a.indirizzo)}" autocomplete="off"></label></div>
       <label>Nota<textarea id="ap-nota" rows="3">${esc(a.nota)}</textarea></label>
       <div class="riga"><button class="btn btn-primario" data-az="salva-app">Salva</button>
         ${esistente ? `<button class="btn btn-pericolo" data-az="elimina-app">Elimina</button>` : ""}</div></div></div>`;
+  let clienteId = a.cliente_id || "";   // cliente del PC scelto dall'elenco (se c'è)
   v.addEventListener("click", async e => {
     const az = e.target.dataset.az;
     if (e.target === v || az === "chiudi-foglio") { v.remove(); return; }
+    if (az === "scegli-cliente-app") {
+      foglioClienti(c => {
+        if (!c) return;
+        clienteId = c.id;
+        v.querySelector("#ap-cliente").value = c.nome;
+        if (c.telefono) v.querySelector("#ap-tel").value = c.telefono;
+        if (indirizzoCliente(c)) v.querySelector("#ap-ind").value = indirizzoCliente(c);
+      });
+      return;
+    }
     if (az === "salva-app") {
       const data = v.querySelector("#ap-data").value;
       if (!data) { avviso("Scegli la data.", "err"); return; }
       const t = adesso();
+      const legato = clientiPC.find(c => c.id === clienteId);
+      if (!legato || normNome(legato.nome) !== normNome(v.querySelector("#ap-cliente").value)) clienteId = "";   // nome cambiato: non è più quel cliente
       const nuovo = { ...(esistente || {}), id: esistente ? esistente.id : nuovoId(), tipo: v.querySelector("#ap-tipo").value, data, ora: v.querySelector("#ap-ora").value,
         cliente: v.querySelector("#ap-cliente").value.trim(), telefono: v.querySelector("#ap-tel").value.trim(), indirizzo: v.querySelector("#ap-ind").value.trim(),
         nota: v.querySelector("#ap-nota").value.trim(), creato: esistente ? esistente.creato : t, modificato: t, eliminato: false };
+      if (clienteId) nuovo.cliente_id = clienteId; else delete nuovo.cliente_id;
       await db.salvaApp(nuovo);
       giornoApp = data; meseApp = new Date(data + "T12:00:00"); meseApp.setDate(1);
       appuntamenti = await db.tuttiApp(); v.remove(); disegnaCalendario(); avviso("Appuntamento salvato.", "ok");
@@ -491,7 +620,9 @@ function disegnaEditor() {
   const r = rilievo, y = window.scrollY;
   $app.innerHTML = barra(r.cliente.nome || "Nuovo rilievo", { indietro: true, stato: "Salvato ✓" }) + `<main>
     <section class="card"><h2>Cliente</h2>
+      <button class="btn btn-piccolo" data-az="scegli-cliente" style="margin-bottom:.7rem">👥 Scegli dai clienti del PC</button>
       ${campoTesto(["cliente", "nome"], "Nome e cognome", r.cliente.nome, "autocapitalize=words")}
+      <div id="sugg-cliente" style="margin:-.3rem 0 .6rem">${suggerimentiCliente()}</div>
       <div class="griglia">
         <label>Telefono<input data-p='["cliente","telefono"]' value="${esc(r.cliente.telefono)}" type="tel" inputmode="tel" autocomplete="off"></label>
         <label>Email<input data-p='["cliente","email"]' value="${esc(r.cliente.email)}" type="email" inputmode="email" autocapitalize="off" autocomplete="off"></label>
@@ -515,7 +646,7 @@ function disegnaEditor() {
                 <button class="btn btn-piccolo" data-az="duplica" data-s="${si}" data-a="${ai}">Duplica</button>
                 <button class="btn btn-piccolo btn-pericolo" data-az="elimina-apertura" data-s="${si}" data-a="${ai}">Elimina</button></div>
               <label>Tipo<select data-p='["stanze",${si},"aperture",${ai},"tipo"]'>${TIPI_APERTURA.map(t => `<option ${t === a.tipo ? "selected" : ""}>${esc(t)}</option>`).join("")}</select></label>
-              <div class="griglia">${MISURE.map(([k, et]) => campoMisura(["stanze", si, "aperture", ai, k], et, a[k])).join("")}</div>
+              <div class="griglia">${misureDi(a).map(([k, et]) => campoMisura(["stanze", si, "aperture", ai, k], et, a[k])).join("")}</div>
               <label>Installazione<select data-p='["stanze",${si},"aperture",${ai},"installazione"]'><option value="">—</option>${INSTALLAZIONI.map(t => `<option ${t === a.installazione ? "selected" : ""}>${esc(t)}</option>`).join("")}</select></label>
               <label>Tenda desiderata<input list="elenco-tende" data-p='["stanze",${si},"aperture",${ai},"tenda_desiderata"]' value="${esc(a.tenda_desiderata)}" autocomplete="off"></label>
               <label>Note<textarea data-p='["stanze",${si},"aperture",${ai},"note"]' rows="2">${esc(a.note)}</textarea></label>
@@ -580,6 +711,10 @@ function vistaImpostazioni() {
       <label>Ramo<input id="cfg-ramo" value="${esc(c ? c.b : "main")}" autocapitalize="off" autocomplete="off"></label>
       <div class="riga"><button class="btn btn-primario" data-az="salva-cfg">Salva</button><button class="btn" data-az="prova-cfg">Prova la connessione</button>
         ${c ? `<button class="btn btn-pericolo" data-az="scollega">Scollega</button>` : ""}</div>
+    </section>
+    <section class="card"><h2>Versione dell'app</h2>
+      <p class="small muted" style="margin-top:0">Versione ${VERSIONE_APP}. Quando c'è una versione nuova l'app si aggiorna da sola (apri l'app con la rete attiva). Se non succede, premi il pulsante: i rilievi e gli appuntamenti sul telefono non si toccano.</p>
+      <button class="btn btn-piccolo" data-az="aggiorna-app">⟳ Aggiorna l'app</button>
     </section>
     <section class="card"><h2>Come funziona</h2>
       <p class="small muted">I rilievi restano sul telefono anche senza rete. Con «Invia al PC» vanno nel repository privato su GitHub; sul computer, nel programma, si scaricano con «Scarica nuovi rilievi».
@@ -655,7 +790,12 @@ $app.addEventListener("input", e => {
     const p = document.getElementById("pos-salvata"); if (p) p.remove();
     aggiornaLinkMappe();
   }
-  if (percorso.join() === "cliente,nome") { const t = document.querySelector(".barra h1"); if (t) t.textContent = e.target.value || "Nuovo rilievo"; }
+  if (percorso.join() === "cliente,nome") {
+    const t = document.querySelector(".barra h1"); if (t) t.textContent = e.target.value || "Nuovo rilievo";
+    const legato = rilievo.cliente_id && clientiPC.find(c => c.id === rilievo.cliente_id);
+    if (legato && normNome(legato.nome) !== normNome(e.target.value)) delete rilievo.cliente_id;   // nome cambiato: non è più quel cliente
+    const sg = document.getElementById("sugg-cliente"); if (sg) sg.innerHTML = suggerimentiCliente();
+  }
   cambiato();
 });
 $app.addEventListener("change", e => {
@@ -677,6 +817,7 @@ $app.addEventListener("click", async e => {
   if (apriRilievo) { location.hash = "#/r/" + apriRilievo.dataset.apri; return; }
   const miniatura = e.target.closest("button[data-foto]");
   if (miniatura) { apriVisore(miniatura.dataset.foto, JSON.parse(miniatura.dataset.dest)); return; }
+  if (e.target.closest("a[href]")) return;   // telefono, mappe e altri collegamenti seguono il loro corso
   const b = e.target.closest("[data-az]");
   if (!b) return;
   const az = b.dataset.az, s = +b.dataset.s, a = +b.dataset.a;
@@ -691,12 +832,16 @@ $app.addEventListener("click", async e => {
     else if (az === "oggi-app") { giornoApp = oggi(); meseApp = new Date(); meseApp.setDate(1); disegnaCalendario(); }
     else if (az === "nuova-app") foglioAppuntamento(null);
     else if (az === "modifica-app") foglioAppuntamento(appuntamenti.find(x => x.id === b.dataset.id));
+    else if (az === "dettaglio-app") await foglioDettaglio(appuntamenti.find(x => x.id === b.dataset.id));
     else if (az === "sync-app") await aggiornaCalendario(false);
+    else if (az === "aggiorna-app") await aggiornaApp();
     else if (az === "fatto") { await salvaOra(); location.hash = ""; }
     else if (az === "posizione") await usaPosizione();
     else if (az === "cerca") await cercaIndirizzo();
     else if (az === "nuova-stanza") foglioStanze();
     else if (az === "nuova-apertura") { rilievo.stanze[s].aperture.push(nuovaApertura()); cambiato(); disegnaEditor(); }
+    else if (az === "scegli-cliente") foglioClienti(c => applicaCliente(c));
+    else if (az === "usa-cliente") applicaCliente(clientiPC.find(c => c.id === b.dataset.id));
     else if (az === "duplica") { const copia = JSON.parse(JSON.stringify(rilievo.stanze[s].aperture[a])); copia.foto = []; rilievo.stanze[s].aperture.splice(a + 1, 0, copia); cambiato(); disegnaEditor(); }
     else if (az === "elimina-apertura") {
       if (!confirm("Eliminare questa apertura e le sue foto?")) return;
@@ -742,6 +887,27 @@ addEventListener("hashchange", () => { if (location.hash.startsWith("#cfg=")) im
 addEventListener("online", () => { if (!rilievo && config() && !invioInCorso) db.tutti().then(l => { if (l.some(daInviare)) avviso("Torna la rete: premi «Invia al PC».", "", 4000); }); });
 
 importaDaIndirizzo();
+caricaClientiLocali().then(() => aggiornaClienti()).catch(() => {});   // elenco clienti del PC: quelli già scaricati subito, poi l'aggiornamento
 vai().catch(e => { $app.innerHTML = `<main><div class="banner banner-err">Non riesco ad aprire l'archivio del telefono: ${esc(e.message || e)}<br>Se stai usando la navigazione privata, esci e riprova.</div></main>`; });
-if ("serviceWorker" in navigator) addEventListener("load", () => navigator.serviceWorker.register("sw.js").catch(() => {}));
+// aggiornamento dell'app: quando il sito pubblicato cambia, il service worker nuovo prende il posto del vecchio e la pagina si ricarica da sola
+async function aggiornaApp() {
+  if (timerSalva) await salvaOra();
+  avviso("Aggiorno l'app…");
+  try {
+    for (const reg of await navigator.serviceWorker.getRegistrations()) await reg.unregister();
+    for (const nome of await caches.keys()) await caches.delete(nome);   // solo i file del sito: i dati (IndexedDB) restano
+  } catch (e) { /* senza service worker si ricarica e basta */ }
+  location.reload();
+}
+if ("serviceWorker" in navigator) {
+  const aveva = !!navigator.serviceWorker.controller;
+  let ricarica = false;
+  navigator.serviceWorker.addEventListener("controllerchange", async () => {
+    if (!aveva || ricarica) return;          // il primo servizio installato non deve ricaricare la pagina
+    ricarica = true;
+    if (timerSalva) await salvaOra();         // quello che si stava scrivendo è già al sicuro
+    location.reload();
+  });
+  addEventListener("load", () => navigator.serviceWorker.register("sw.js").then(reg => reg.update()).catch(() => {}));
+}
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});

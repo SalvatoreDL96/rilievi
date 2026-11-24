@@ -1,10 +1,16 @@
 // Fa funzionare il sito anche senza rete (dai clienti il segnale spesso manca): i file del sito si tengono in memoria.
 // Le chiamate a GitHub e alle mappe non passano di qui: vanno sempre direttamente in rete.
-const VERSIONE = "rilievi-v2";
+// Quando si pubblica una versione nuova basta cambiare VERSIONE: l'app la scarica da sola e si ricarica.
+const VERSIONE = "rilievi-v5";
 const FILE = ["./", "index.html", "app.js", "stile.css", "manifest.webmanifest", "icone/icona-180.png", "icone/icona-192.png", "icone/icona-512.png"];
 
 self.addEventListener("install", e => {
-  e.waitUntil(caches.open(VERSIONE).then(c => c.addAll(FILE)).then(() => self.skipWaiting()));
+  // cache: "reload" salta la memoria del browser (GitHub Pages tiene i file in cache per 10 minuti): si scaricano sempre quelli nuovi
+  e.waitUntil(caches.open(VERSIONE).then(cache => Promise.all(FILE.map(async f => {
+    const r = await fetch(new Request(f, { cache: "reload" }));
+    if (!r.ok) throw new Error("File non scaricabile: " + f);
+    await cache.put(f, r);
+  }))).then(() => self.skipWaiting()));
 });
 
 self.addEventListener("activate", e => {
@@ -23,4 +29,3 @@ self.addEventListener("fetch", e => {
     return (await dallaRete) || (e.request.mode === "navigate" ? cache.match("index.html") : Response.error());
   }));
 });
-
