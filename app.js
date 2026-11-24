@@ -18,7 +18,7 @@ const MISURE = [["larghezza", "Larghezza"], ["altezza_sx", "Altezza sinistra"], 
 const misureDi = a => (a.altezza !== undefined && a.altezza !== "") ? [MISURE[0], ["altezza", "Altezza (vecchio rilievo)"], ...MISURE.slice(1)] : MISURE;
 const CHIAVE_CONFIG = "giode_rilievi_cfg";
 const API = "https://api.github.com";
-const VERSIONE_APP = "6 (24/11/2026)";   // da cambiare insieme a VERSIONE in sw.js a ogni pubblicazione
+const VERSIONE_APP = "7 (24/11/2026)";   // da cambiare insieme a VERSIONE in sw.js a ogni pubblicazione
 
 const $app = document.getElementById("app");
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -87,6 +87,7 @@ const db = (() => {
     salvaApp: a => op("appuntamenti", "readwrite", s => s.put(a)),
     salvaFoto: (chiave, blob) => op("foto", "readwrite", s => s.put(blob, chiave)),
     leggiFoto: chiave => op("foto", "readonly", s => s.get(chiave)),
+    chiaviFoto: id => op("foto", "readonly", s => s.getAllKeys(intervallo(id))),
     eliminaFoto: chiave => op("foto", "readwrite", s => s.delete(chiave)),
   };
 })();
@@ -147,12 +148,16 @@ function nomiFoto(r) {
   for (const s of r.stanze || []) { nomi.push(...(s.foto || [])); for (const a of s.aperture || []) nomi.push(...(a.foto || [])); }
   return nomi;
 }
-const daInviare = r => !(r._sync && r._sync.inviato === r.modificato) || nomiFoto(r).some(n => !(r._sync.foto || {})[n]);
+// una bozza (rilievo nuovo non ancora salvato con «Salva») non si manda al PC
+const daInviare = r => !r.bozza && (!(r._sync && r._sync.inviato === r.modificato) || nomiFoto(r).some(n => !(r._sync.foto || {})[n]));
 const contaAperture = r => (r.stanze || []).reduce((n, s) => n + (s.aperture || []).length, 0);
+// rilievo senza niente dentro (nessun dato del cliente, indirizzo, note, stanze o foto): non vale la pena tenerlo
+const rilievoVuoto = r => !(r.cliente && (r.cliente.nome || r.cliente.telefono || r.cliente.email)) && !(r.indirizzo && r.indirizzo.testo)
+  && !String(r.note || "").trim() && !(r.stanze || []).length && !(r.foto || []).length;
 
 function nuovoRilievo() {
   const t = adesso();
-  return { id: nuovoId(), versione: 1, data: oggi(), creato: t, modificato: t, cliente: { nome: "", telefono: "", email: "" },
+  return { id: nuovoId(), versione: 1, data: oggi(), creato: t, modificato: t, bozza: true, cliente: { nome: "", telefono: "", email: "" },
            indirizzo: { testo: "", lat: null, lon: null }, note: "", stanze: [], foto: [], _sync: { inviato: "", foto: {} } };
 }
 const nuovaApertura = () => ({ tipo: "Finestra", larghezza: "", altezza_sx: "", altezza_dx: "", altezza_davanzale: "", altezza_soffitto: "",
@@ -226,17 +231,37 @@ async function aggiungiFoto(files, percorso) {
   if (fatte) { cambiato(); await salvaOra(); disegnaEditor(); avviso(fatte === 1 ? "Foto aggiunta." : `${fatte} foto aggiunte.`, "ok"); }
 }
 
+// La foto di un rilievo fatto con un altro telefono non è qui: si scarica da GitHub (se non è stata tolta) e si tiene sul telefono.
+async function fotoDaGithub(rilievoId, nome) {
+  const c = config();
+  if (!c || !inRete()) return null;
+  try {
+    const r = await fetch(`${API}/repos/${c.r}/contents/foto/${encodeURIComponent(rilievoId)}/${encodeURIComponent(nome)}?ref=${encodeURIComponent(c.b)}`,
+      { headers: { Authorization: "Bearer " + c.t, Accept: "application/vnd.github.raw+json", "X-GitHub-Api-Version": "2022-11-28" } });
+    if (!r.ok) return null;
+    const blob = await r.blob();
+    await db.salvaFoto(`${rilievoId}/${nome}`, blob);
+    return blob;
+  } catch (e) { return null; }
+}
+async function leggiFotoLocaleOGithub(rilievoId, nome) {
+  return (await db.leggiFoto(`${rilievoId}/${nome}`)) || (await fotoDaGithub(rilievoId, nome));
+}
+
 async function caricaMiniature() {
   urlFoto.splice(0).forEach(u => URL.revokeObjectURL(u));
+  const mio = rilievo && rilievo.id;
   for (const img of document.querySelectorAll("img[data-foto]")) {
-    const blob = await db.leggiFoto(`${rilievo.id}/${img.dataset.foto}`);
+    const blob = await leggiFotoLocaleOGithub(mio, img.dataset.foto);
+    if (!rilievo || rilievo.id !== mio) return;     // nel frattempo si è cambiata schermata
     if (blob) { const u = URL.createObjectURL(blob); urlFoto.push(u); img.src = u; }
+    else { img.alt = "Foto non disponibile"; img.parentElement.title = "Foto non disponibile: era di un altro telefono ed è già stata tolta da GitHub"; img.parentElement.style.opacity = ".4"; }
   }
 }
 
 async function apriVisore(nome, percorso) {
-  const blob = await db.leggiFoto(`${rilievo.id}/${nome}`);
-  if (!blob) { avviso("Questa foto non è più sul telefono.", "err"); return; }
+  const blob = await leggiFotoLocaleOGithub(rilievo.id, nome);
+  if (!blob) { avviso("Questa foto non è più sul telefono né su GitHub.", "err"); return; }
   const url = URL.createObjectURL(blob);
   const v = document.createElement("div");
   v.className = "visore";
@@ -248,8 +273,7 @@ async function apriVisore(nome, percorso) {
     if (az === "chiudi") chiudi();
     if (az === "elimina" && confirm("Eliminare questa foto?")) {
       const d = percorsoDi(rilievo, percorso);
-      d.foto = d.foto.filter(n => n !== nome);
-      await db.eliminaFoto(`${rilievo.id}/${nome}`);
+      d.foto = d.foto.filter(n => n !== nome);      // il file si toglie dal telefono al salvataggio: così «Non salvare» può riportarla
       cambiato(); await salvaOra(); chiudi(); disegnaEditor();
     }
   });
@@ -328,7 +352,7 @@ async function vistaHome(conservaScroll) {
       const nFoto = nomiFoto(r).length;
       return `<div class="card cliccabile" data-apri="${esc(r.id)}">
         <div class="riga"><span class="rilievo-titolo">${esc(r.cliente.nome || "Cliente senza nome")}</span><span class="spazio"></span>
-          ${daInviare(r) ? `<span class="badge badge-attesa">da inviare</span>` : `<span class="badge badge-ok">inviato</span>`}</div>
+          ${r.bozza ? `<span class="badge badge-attesa">bozza: non salvato</span>` : daInviare(r) ? `<span class="badge badge-attesa">da inviare</span>` : `<span class="badge badge-ok">inviato</span>`}</div>
         <div class="rilievo-riga">${esc(r.data)}${r.indirizzo.testo ? " · " + esc(r.indirizzo.testo) : ""}</div>
         <div class="rilievo-riga">${(r.stanze || []).length} stanze · ${contaAperture(r)} aperture · ${nFoto} foto</div></div>`;
     }).join("") || `<div class="vuoto">Nessun rilievo.<br>Premi «Nuovo rilievo» per cominciare il primo sopralluogo.</div>`}
@@ -674,7 +698,7 @@ function disegnaEditor() {
     <button class="btn btn-largo btn-pericolo" data-az="elimina-rilievo">Elimina questo rilievo dal telefono</button>
     <datalist id="elenco-tende">${TENDE.map(t => `<option value="${esc(t)}">`).join("")}</datalist>
   </main>
-  <div class="fondo"><div><button class="btn btn-primario" data-az="fatto">Fatto</button></div></div>`;
+  <div class="fondo"><div><button class="btn btn-primario" data-az="salva-rilievo">💾 Salva</button><button class="btn" data-az="esci-rilievo">Esci</button></div></div>`;
   window.scrollTo(0, y);
   caricaMiniature();
 }
@@ -700,8 +724,61 @@ function foglioStanze() {
   document.body.appendChild(v);
 }
 
-async function eliminaFotoDi(oggetto) {
-  for (const n of oggetto.foto || []) await db.eliminaFoto(`${rilievo.id}/${n}`);
+async function eliminaFotoDi() {
+  // i file delle foto tolte restano sul telefono fino al salvataggio (pulizia in salvaRilievoEsplicito): così «Non salvare» può riportarle
+}
+
+// ---- salvare e uscire dal rilievo: nuovo = bozza finché non si preme «Salva»; uscendo senza salvare si sceglie cosa fare ----
+let modificatoAperto = "", istantanea = "";
+
+async function salvaRilievoEsplicito() {
+  clearTimeout(timerSalva); timerSalva = null;
+  const r = rilievo;
+  r.bozza = false; r.modificato = adesso();
+  await salvaOra();
+  try {   // pulizia dei file delle foto che non servono più
+    const usate = new Set(nomiFoto(r).map(n => `${r.id}/${n}`));
+    for (const chiave of await db.chiaviFoto(r.id)) if (!usate.has(chiave)) await db.eliminaFoto(chiave);
+  } catch (e) { /* pulizia non essenziale */ }
+  avviso("Rilievo salvato ✓", "ok");
+  location.hash = "";
+}
+
+function foglioUscita(nuovo) {
+  return new Promise(ok => {
+    const v = document.createElement("div");
+    v.className = "velo";
+    v.innerHTML = `<div class="foglio"><h2>Salvare il rilievo?</h2><div class="card">
+      <p style="margin-top:0">${nuovo ? "È un rilievo nuovo, non ancora salvato." : "Hai fatto delle modifiche a questo rilievo."}</p>
+      <button class="btn btn-primario btn-largo" data-s="salva">💾 Salva</button>
+      <button class="btn btn-largo btn-pericolo" style="margin-top:.5rem" data-s="scarta">${nuovo ? "Non salvare (elimina il rilievo)" : "Non salvare (annulla le modifiche)"}</button>
+      <button class="btn btn-largo" style="margin-top:.5rem" data-s="continua">Continua a modificare</button></div></div>`;
+    v.addEventListener("click", e => {
+      const s = e.target.dataset.s;
+      if (s) { v.remove(); ok(s); } else if (e.target === v) { v.remove(); ok("continua"); }
+    });
+    document.body.appendChild(v);
+  });
+}
+
+async function uscitaEditor() {
+  if (timerSalva) await salvaOra();
+  const r = rilievo;
+  if (!r) { location.hash = ""; return; }
+  if (rilievoVuoto(r)) { await db.elimina(r.id); rilievo = null; location.hash = ""; return; }   // vuoto: niente da salvare
+  if (!(r.bozza || r.modificato !== modificatoAperto)) { location.hash = ""; return; }           // nessuna modifica
+  const scelta = await foglioUscita(!!r.bozza);
+  if (scelta === "continua") return;
+  if (scelta === "salva") { await salvaRilievoEsplicito(); return; }
+  // «Non salvare»: un rilievo nuovo sparisce, uno già salvato torna com'era quando l'hai aperto
+  const prima = JSON.parse(istantanea);
+  if (prima.bozza) await db.elimina(r.id);
+  else {
+    const tenere = new Set(nomiFoto(prima));
+    for (const n of nomiFoto(r)) if (!tenere.has(n)) await db.eliminaFoto(`${r.id}/${n}`);
+    await db.salva(prima);
+  }
+  rilievo = null; location.hash = "";
 }
 
 function vistaImpostazioni() {
@@ -757,13 +834,14 @@ async function inviaRilievo(id, avanza) {
   avanza("Invio dei dati…");
   const { _sync, ...pulito } = r;
   const contenuto = aBase64Testo(JSON.stringify(pulito, null, 1));
+  let risposta = null;
   for (let tentativo = 0; tentativo < 2; tentativo++) {
     const esistente = await gh("GET", `rilievi/${r.id}.json`);
-    try { await gh("PUT", `rilievi/${r.id}.json`, { message: "Rilievo " + (r.cliente.nome || r.id), content: contenuto, ...(esistente ? { sha: esistente.sha } : {}) }); break; }
+    try { risposta = await gh("PUT", `rilievi/${r.id}.json`, { message: "Rilievo " + (r.cliente.nome || r.id), content: contenuto, ...(esistente ? { sha: esistente.sha } : {}) }); break; }
     catch (e) { if (tentativo || (e.stato !== 409 && e.stato !== 422)) throw e; }
   }
   const fresco = (await db.leggi(id)) || r;           // se nel frattempo è stato modificato, resta «da inviare»
-  fresco._sync = { inviato: pulito.modificato, foto: inviate };
+  fresco._sync = { inviato: pulito.modificato, foto: inviate, sha: risposta && risposta.content ? risposta.content.sha : undefined };
   await db.salva(fresco);
 }
 
@@ -809,6 +887,32 @@ function aggiornaVistaDopoSync() {
   else if (!rilievo && !/^#\/(r|impostazioni)/.test(h)) vistaHome(true);
 }
 
+// Rilievi fatti con gli altri telefoni: si scaricano da GitHub (solo quelli nuovi o cambiati). Se qui ci sono modifiche
+// non ancora inviate, quelle hanno la precedenza. Le bozze e il rilievo aperto in questo momento non si toccano.
+async function scaricaRilievi() {
+  const lista = await gh("GET", "rilievi");
+  if (!Array.isArray(lista)) return 0;
+  let nuovi = 0;
+  for (const voce of lista.filter(v => v.name.endsWith(".json"))) {
+    const id = voce.name.slice(0, -5);
+    if (!/^[\w\-]{6,64}$/.test(id) || (rilievo && rilievo.id === id)) continue;
+    const loc = await db.leggi(id);
+    if (loc && loc._sync && loc._sync.sha === voce.sha) continue;        // invariato dall'ultima volta
+    if (loc && (loc.bozza || daInviare(loc))) continue;                  // qui ci sono modifiche in attesa: partono quelle
+    const f = await gh("GET", `rilievi/${id}.json`);
+    if (!f || !f.content) continue;
+    let r;
+    try { r = JSON.parse(decodifica64(f.content)); } catch (e) { continue; }
+    if (!r || r.id !== id || rilievoVuoto(r)) continue;
+    if (loc && String(loc.modificato) >= String(r.modificato)) { loc._sync = { ...(loc._sync || {}), sha: f.sha }; await db.salva(loc); continue; }
+    const foto = {};
+    nomiFoto(r).forEach(n => { foto[n] = true; });                       // le foto sono già su GitHub: non si rimandano
+    await db.salva({ ...r, bozza: false, _sync: { inviato: r.modificato, foto, sha: f.sha } });
+    nuovi++;
+  }
+  return nuovi;
+}
+
 async function sincronizzaTutto(silenzioso = true) {
   if (sincronizzandoTutto || invioInCorso || sincronizzandoApp || !config()) return;
   if (!inRete()) { mostraStatoSync(); return; }
@@ -822,6 +926,7 @@ async function sincronizzaTutto(silenzioso = true) {
     if (a.scaricati || a.inviati) cambiato = true;
     const da = (await db.tutti()).filter(r => daInviare(r) && !(rilievo && rilievo.id === r.id));   // il rilievo aperto parte quando lo si chiude
     for (const r of da) { await inviaRilievo(r.id, () => {}); cambiato = true; }
+    if (await scaricaRilievi()) cambiato = true;                    // rilievi fatti con gli altri telefoni
     appuntamenti = await db.tuttiApp();
     const t = new Date();
     ultimaSync = `${String(t.getHours()).padStart(2, "0")}:${String(t.getMinutes()).padStart(2, "0")}`;
@@ -883,7 +988,9 @@ $app.addEventListener("click", async e => {
   if (!b) return;
   const az = b.dataset.az, s = +b.dataset.s, a = +b.dataset.a;
   try {
-    if (az === "indietro") { if (timerSalva) await salvaOra(); history.length > 1 ? history.back() : (location.hash = ""); }
+    if (az === "indietro") { if (rilievo) await uscitaEditor(); else history.length > 1 ? history.back() : (location.hash = ""); }
+    else if (az === "esci-rilievo") await uscitaEditor();
+    else if (az === "salva-rilievo") await salvaRilievoEsplicito();
     else if (az === "impostazioni") location.hash = "#/impostazioni";
     else if (az === "nuovo") { const r = nuovoRilievo(); await db.salva(r); location.hash = "#/r/" + r.id; }
     else if (az === "invia") await inviaTutti();
@@ -896,7 +1003,6 @@ $app.addEventListener("click", async e => {
     else if (az === "dettaglio-app") await foglioDettaglio(appuntamenti.find(x => x.id === b.dataset.id));
     else if (az === "sync-app") { if (!inRete()) avviso("Nessuna connessione: si aggiorna da solo appena c'è rete.", "err"); else await sincronizzaTutto(false); }
     else if (az === "aggiorna-app") await aggiornaApp();
-    else if (az === "fatto") { await salvaOra(); location.hash = ""; }
     else if (az === "posizione") await usaPosizione();
     else if (az === "cerca") await cercaIndirizzo();
     else if (az === "nuova-stanza") foglioStanze();
@@ -931,13 +1037,23 @@ $app.addEventListener("click", async e => {
 });
 
 // ------------------------------------------------------------------------------------------------ avvio
+// all'apertura spariscono i rilievi vuoti rimasti (quelli creati senza scrivere niente)
+async function pulisciVuoti() {
+  try { for (const r of await db.tutti()) if (rilievoVuoto(r)) await db.elimina(r.id); } catch (e) { /* non essenziale */ }
+}
+
 async function vai() {
   const h = location.hash;
   const m = h.match(/^#\/r\/([\w\-]+)/);
-  if (rilievo && !m) { if (timerSalva) await salvaOra(); sincronizzaSubito(); }   // si esce da un rilievo: si manda subito al PC
+  if (rilievo && !m) {   // si esce da un rilievo (anche con il tasto indietro del telefono): si salva lo stato, i vuoti spariscono, il resto va al PC
+    if (timerSalva) await salvaOra();
+    if (rilievoVuoto(rilievo)) { await db.elimina(rilievo.id); rilievo = null; }
+    sincronizzaSubito();
+  }
   if (m) {
     const r = await db.leggi(m[1]);
     if (!r) { location.hash = ""; return; }
+    modificatoAperto = r.modificato; istantanea = JSON.stringify(r);   // com'era all'apertura: serve per «Non salvare»
     rilievo = r; rilievo.stanze = rilievo.stanze || []; rilievo.foto = rilievo.foto || [];
     rilievo.cliente = rilievo.cliente || {}; rilievo.indirizzo = rilievo.indirizzo || { testo: "", lat: null, lon: null };
     disegnaEditor();
@@ -949,7 +1065,7 @@ addEventListener("hashchange", () => { if (location.hash.startsWith("#cfg=")) im
 
 importaDaIndirizzo();
 caricaClientiLocali().then(() => aggiornaClienti()).catch(() => {});   // elenco clienti del PC: quelli già scaricati subito, poi l'aggiornamento
-vai().catch(e => { $app.innerHTML = `<main><div class="banner banner-err">Non riesco ad aprire l'archivio del telefono: ${esc(e.message || e)}<br>Se stai usando la navigazione privata, esci e riprova.</div></main>`; });
+pulisciVuoti().then(() => vai()).catch(e => { $app.innerHTML =`<main><div class="banner banner-err">Non riesco ad aprire l'archivio del telefono: ${esc(e.message || e)}<br>Se stai usando la navigazione privata, esci e riprova.</div></main>`; });
 // aggiornamento dell'app: quando il sito pubblicato cambia, il service worker nuovo prende il posto del vecchio e la pagina si ricarica da sola
 async function aggiornaApp() {
   if (timerSalva) await salvaOra();
