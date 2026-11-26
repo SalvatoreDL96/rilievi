@@ -18,7 +18,7 @@ const MISURE = [["larghezza", "Larghezza"], ["altezza_sx", "Altezza sinistra"], 
 const misureDi = a => (a.altezza !== undefined && a.altezza !== "") ? [MISURE[0], ["altezza", "Altezza (vecchio rilievo)"], ...MISURE.slice(1)] : MISURE;
 const CHIAVE_CONFIG = "giode_rilievi_cfg";
 const API = "https://api.github.com";
-const VERSIONE_APP = "14 (26/11/2026)";   // da cambiare insieme a VERSIONE in sw.js a ogni pubblicazione
+const VERSIONE_APP = "15 (26/11/2026)";   // da cambiare insieme a VERSIONE in sw.js a ogni pubblicazione
 
 const $app = document.getElementById("app");
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -294,14 +294,63 @@ async function apriVisore(nome, percorso) {
 // l'indirizzo così com'è scritto, su una riga: le mappe lo trovano meglio senza aggiunte
 const unaRiga = s => String(s || "").split("\n").map(r => r.trim().replace(/,+$/, "")).filter(Boolean).join(", ");
 
+
+// ---- punto esatto del cliente: preso sul posto con un telefono, o incollato nella sua scheda sul PC ----
+// Con il punto, Mappe dell'iPhone e Google Maps ricevono le stesse coordinate e aprono lo stesso posto; senza, cercano
+// l'indirizzo scritto (e possono non coincidere). Le regole sono le stesse del programma sul PC.
+let rilieviConPunto = [];
+const haPunto = r => !r.eliminato && !!(r.indirizzo && r.indirizzo.gps && r.indirizzo.lat != null && r.indirizzo.lon != null);
+async function caricaPunti() { rilieviConPunto = (await db.tutti()).filter(haPunto); }
+// il rilievo aperto cambia prima di essere salvato: si aggiorna subito il suo punto (preso o tolto)
+const aggiornaPunto = r => { rilieviConPunto = rilieviConPunto.filter(x => x.id !== r.id).concat(haPunto(r) ? [r] : []); };
+// stesso posto? uno dei due indirizzi può avere meno parole, ma il numero civico non deve cambiare; vuoto va con tutti
+function stessoIndirizzo(a, b) {
+  const parti = s => String(s || "").toLowerCase().match(/[a-zà-ù0-9]+/g) || [];
+  const civici = t => t.filter(p => /^\d{1,4}$/.test(p)), parole = t => t.filter(p => !/^\d+$/.test(p));
+  const x = parti(a), y = parti(b), cx = civici(x), cy = civici(y), px = parole(x), py = parole(y);
+  if (cx.length && cy.length && !cx.some(n => cy.includes(n))) return false;
+  return px.every(p => py.includes(p)) || py.every(p => px.includes(p));
+}
+// «lat,lon» del cliente per quell'indirizzo (vince il punto più recente), oppure ""
+function puntoCliente(indirizzo, chi = {}) {
+  const nome = normNome(chi.nome);
+  const c = clientiPC.find(x => x.id === chi.id) || (nome ? clientiPC.find(x => normNome(x.nome) === nome) : undefined);
+  const trovati = [];
+  if (c && c.punto_il && stessoIndirizzo(indirizzo, indirizzoCliente(c))) trovati.push({ punto: c.punto || "", il: c.punto_il });   // vuoto = tolto sul PC
+  for (const r of rilieviConPunto) {
+    const suo = (chi.id && r.cliente_id === chi.id) || (c && r.cliente_id === c.id) || (nome && normNome(r.cliente && r.cliente.nome) === nome);
+    if (suo && stessoIndirizzo(indirizzo, r.indirizzo.testo)) trovati.push({ punto: `${r.indirizzo.lat},${r.indirizzo.lon}`, il: r.indirizzo.gps_il || "" });
+  }
+  trovati.sort((a, b) => b.il.localeCompare(a.il));
+  return trovati.length ? trovati[0].punto : "";
+}
+// i collegamenti alle due mappe: «dove» è il punto esatto («lat,lon») oppure l'indirizzo scritto
+function urlMappe(dove, esatto) {
+  const q = encodeURIComponent(dove);
+  return {
+    apple: esatto ? `https://maps.apple.com/?ll=${dove}&q=${q}` : `https://maps.apple.com/?q=${q}`,
+    google: `https://www.google.com/maps/search/?api=1&query=${q}`,
+    appleIndicazioni: `https://maps.apple.com/?daddr=${q}&dirflg=d`,
+    indicazioni: `https://www.google.com/maps/dir/?api=1&destination=${q}`,
+  };
+}
+function pulsantiMappe(dove, esatto) {
+  const u = urlMappe(dove, esatto);
+  return `<a class="btn btn-piccolo" href="${esc(u.apple)}" target="_blank" rel="noopener">🗺 Mappe</a>
+          <a class="btn btn-piccolo" href="${esc(u.google)}" target="_blank" rel="noopener">📍 Google Maps</a>`;
+}
+
 function linkMappe() {
   const i = rilievo.indirizzo, testo = unaRiga(i.testo);
-  const coordinate = i.lat != null && i.lon != null && (i.gps || !testo) ? `${i.lat},${i.lon}` : "";   // solo se prese sul posto
-  const q = testo || coordinate;
-  if (!q) return `<span class="muted small">Scrivi l'indirizzo o usa la posizione per aprire le mappe.</span>`;
-  const ap = `https://maps.apple.com/?q=${encodeURIComponent(q)}` + (coordinate ? `&ll=${coordinate}` : "");
-  const go = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(coordinate || testo)}`;
-  return `<a class="btn btn-piccolo" href="${esc(ap)}" target="_blank" rel="noopener">🗺 Mappe</a><a class="btn btn-piccolo" href="${esc(go)}" target="_blank" rel="noopener">📍 Google Maps</a>`;
+  // prima la posizione presa qui, poi il punto del cliente, poi l'indirizzo scritto
+  const qui = haPunto(rilievo) ? `${i.lat},${i.lon}` : "";
+  const delCliente = qui ? "" : puntoCliente(testo, { id: rilievo.cliente_id, nome: rilievo.cliente.nome });
+  const vecchie = !testo && i.lat != null && i.lon != null ? `${i.lat},${i.lon}` : "";
+  const esatto = qui || delCliente || vecchie;
+  if (!esatto && !testo) return `<span class="muted small">Scrivi l'indirizzo o usa la posizione per aprire le mappe.</span>`;
+  return pulsantiMappe(esatto || testo, !!esatto) + `<span class="muted small" style="flex-basis:100%">${esatto
+    ? `📍 Le mappe aprono il punto esatto${delCliente ? " salvato per questo cliente" : ""}.`
+    : "Le mappe cercano l'indirizzo scritto. Sul posto usa «Usa la mia posizione»."}</span>`;
 }
 const aggiornaLinkMappe = () => { const el = document.getElementById("mappe"); if (el) el.innerHTML = linkMappe(); };
 
@@ -323,7 +372,8 @@ async function usaPosizione() {
   rilievo.indirizzo.lat = +pos.coords.latitude.toFixed(6);
   rilievo.indirizzo.lon = +pos.coords.longitude.toFixed(6);
   rilievo.indirizzo.gps = true;
-  if (String(rilievo.indirizzo.testo || "").trim()) avviso("Posizione salvata: le mappe si aprono qui. L'indirizzo scritto non è stato cambiato.", "ok", 5000);
+  rilievo.indirizzo.gps_il = adesso();   // tra più punti dello stesso cliente vale il più recente
+  if (String(rilievo.indirizzo.testo || "").trim()) avviso("Posizione salvata ✓ Mappe e Google Maps aprono questo punto. L'indirizzo scritto non è stato cambiato.", "ok", 5000);
   else {   // indirizzo ancora vuoto: si prova a compilarlo dalla posizione
     let testo = "";
     try {
@@ -333,7 +383,7 @@ async function usaPosizione() {
     rilievo.indirizzo.testo = testo || `Posizione ${rilievo.indirizzo.lat}, ${rilievo.indirizzo.lon}`;
     avviso(testo ? "Indirizzo trovato: controllalo e correggi se serve." : "Posizione salvata (l'indirizzo non si è potuto cercare: scrivilo a mano).", testo ? "ok" : "", 5000);
   }
-  cambiato(); disegnaEditor();
+  aggiornaPunto(rilievo); cambiato(); disegnaEditor();
 }
 
 // ------------------------------------------------------------------------------------------------ viste
@@ -596,7 +646,7 @@ async function foglioPreventivo(p) {
     <div class="card"><div style="font-size:1.15rem;font-weight:700">${esc(p.cliente.nome || "Cliente senza nome")}</div>
       <div class="muted small">del ${esc(p.data)}</div>
       ${p.cliente.indirizzo ? `<p style="margin:.4rem 0">${esc(p.cliente.indirizzo)}</p>` : ""}
-      <div class="mappa-link">${p.cliente.telefono ? `<a class="btn btn-piccolo btn-primario" href="tel:${esc(p.cliente.telefono)}">📞 Chiama</a>` : ""}${mappeApp(p.cliente.indirizzo)}</div></div>
+      <div class="mappa-link">${p.cliente.telefono ? `<a class="btn btn-piccolo btn-primario" href="tel:${esc(p.cliente.telefono)}">📞 Chiama</a>` : ""}${mappeApp(p.cliente.indirizzo, { id: p.cliente_id, nome: p.cliente.nome })}</div></div>
     <p class="banner">Spunta i prodotti di cui prendere le misure: ognuno avrà il suo riquadro.</p>
     ${(p.stanze || []).map(s => `<div class="card"><h3>${esc(s.nome)}</h3>${(s.voci || []).map(x => `<label class="scelta-prodotto">
         <input type="checkbox" data-rid="${esc(x.rid)}" ${spuntato(x) ? "checked" : ""}>
@@ -636,11 +686,10 @@ const decodifica64 = b => new TextDecoder().decode(Uint8Array.from(atob(String(b
 const appVisibili = () => appuntamenti.filter(a => !a.eliminato);
 const promemoria = a => a.tipo === "altro" ? a.titolo || "" : "";   // il nome dato al promemoria («Altro»)
 
-function mappeApp(indirizzo) {
-  if (!indirizzo) return "";
-  const q = encodeURIComponent(unaRiga(indirizzo));
-  return `<a class="btn btn-piccolo" href="https://maps.apple.com/?q=${q}" target="_blank" rel="noopener">🗺 Mappe</a>
-          <a class="btn btn-piccolo" href="https://www.google.com/maps/search/?api=1&query=${q}" target="_blank" rel="noopener">📍 Google Maps</a>`;
+// pulsanti delle mappe per un cliente: il suo punto esatto se c'è, altrimenti l'indirizzo scritto
+function mappeApp(indirizzo, chi) {
+  const punto = puntoCliente(indirizzo, chi), dove = punto || unaRiga(indirizzo);
+  return dove ? pulsantiMappe(dove, !!punto) : "";
 }
 
 async function sincronizzaAppuntamenti() {
@@ -696,13 +745,11 @@ async function aggiornaCalendario(silenzioso) {
 // scheda dell'appuntamento: dati del cliente, mappa con la sua posizione, indicazioni stradali
 async function foglioDettaglio(a) {
   if (!a) return;
-  // se per questo cliente c'è un rilievo con la posizione presa sul posto, si usa quella (più precisa dell'indirizzo scritto)
-  const nome = (a.cliente || "").trim().toLowerCase();
-  const rilievi = nome ? await db.tutti() : [];
-  const r = rilievi.find(x => ((x.cliente && x.cliente.nome) || "").trim().toLowerCase() === nome && x.indirizzo && x.indirizzo.gps && x.indirizzo.lat != null
-    && normNome(x.indirizzo.testo) === normNome(a.indirizzo || x.indirizzo.testo));
-  const dove = r ? `${r.indirizzo.lat},${r.indirizzo.lon}` : unaRiga(a.indirizzo);
-  const q = encodeURIComponent(dove);
+  // il punto esatto del cliente, se c'è (più preciso dell'indirizzo scritto)
+  await caricaPunti();
+  const punto = puntoCliente(a.indirizzo, { id: a.cliente_id, nome: a.cliente });
+  const dove = punto || unaRiga(a.indirizzo);
+  const u = urlMappe(dove, !!punto);
   const v = document.createElement("div");
   v.className = "velo";
   v.innerHTML = `<div class="foglio"><h2><span>${esc(TIPI_APP[a.tipo] || a.tipo)} · ${esc(a.ora || "tutto il giorno")}</span> <button class="btn btn-piccolo" data-az="chiudi-foglio">Chiudi</button></h2>
@@ -712,13 +759,13 @@ async function foglioDettaglio(a) {
       ${a.cliente ?`<div style="font-size:1.15rem;font-weight:700;margin:.2rem 0">${esc(a.cliente)}</div>` : ""}
       ${a.telefono ? `<a class="btn btn-piccolo btn-primario" href="tel:${esc(a.telefono)}">📞 Chiama ${esc(a.telefono)}</a>` : ""}
       ${a.indirizzo ? `<p style="margin:.6rem 0 .2rem">${esc(a.indirizzo)}</p>` : ""}
-      ${dove ? `${r ? `<iframe class="mappa-app" loading="lazy" referrerpolicy="no-referrer-when-downgrade" title="Mappa"
-          src="https://maps.google.com/maps?q=${q}&z=16&output=embed"></iframe>
-        <p class="muted small" style="margin:.3rem 0 .5rem">📍 Posizione presa sul posto con il rilievo. La mappa ha bisogno della rete.</p>` : ""}
+      ${dove ? `${punto ? `<iframe class="mappa-app" loading="lazy" referrerpolicy="no-referrer-when-downgrade" title="Mappa"
+          src="https://maps.google.com/maps?q=${encodeURIComponent(punto)}&z=16&output=embed"></iframe>
+        <p class="muted small" style="margin:.3rem 0 .5rem">📍 Punto esatto del cliente. La mappa ha bisogno della rete.</p>` : ""}
         <div class="mappa-link" style="margin-top:.5rem">
-          <a class="btn btn-piccolo btn-primario" href="https://www.google.com/maps/dir/?api=1&destination=${q}" target="_blank" rel="noopener">🧭 Indicazioni</a>
-          <a class="btn btn-piccolo" href="https://maps.apple.com/?daddr=${q}&dirflg=d" target="_blank" rel="noopener">🗺 Mappe</a>
-          <a class="btn btn-piccolo" href="https://www.google.com/maps/search/?api=1&query=${q}" target="_blank" rel="noopener">📍 Google Maps</a></div>`
+          <a class="btn btn-piccolo btn-primario" href="${esc(u.indicazioni)}" target="_blank" rel="noopener">🧭 Indicazioni Google</a>
+          <a class="btn btn-piccolo" href="${esc(u.appleIndicazioni)}" target="_blank" rel="noopener">🗺 Indicazioni iPhone</a>
+          <a class="btn btn-piccolo" href="${esc(u.google)}" target="_blank" rel="noopener">📍 Google Maps</a></div>`
         : `<p class="muted">Nessun indirizzo: aggiungilo con «Modifica» per vedere la mappa.</p>`}
       ${a.nota ? `<p style="white-space:pre-wrap;margin:.8rem 0 0"><strong>Nota:</strong> ${esc(a.nota)}</p>` : ""}
       <div class="riga" style="margin-top:.9rem"><button class="btn btn-primario" data-az="modifica-da-scheda">Modifica</button></div>
@@ -731,7 +778,7 @@ async function foglioDettaglio(a) {
 }
 
 function rigaApp(a, conData) {
-  const azioni = (a.telefono ? `<a class="btn btn-piccolo btn-primario" href="tel:${esc(a.telefono)}">📞 Chiama</a>` : "") + (a.indirizzo ? mappeApp(a.indirizzo) : "");
+  const azioni = (a.telefono ? `<a class="btn btn-piccolo btn-primario" href="tel:${esc(a.telefono)}">📞 Chiama</a>` : "") + mappeApp(a.indirizzo, { id: a.cliente_id, nome: a.cliente });
   return `<div class="app-riga t-${esc(a.tipo)}" data-az="dettaglio-app" data-id="${esc(a.id)}" style="cursor:pointer">
     <div class="riga"><strong>${conData ? esc(dataLunga(a.data)) + " · " : ""}${esc(a.ora || "tutto il giorno")}</strong><span class="badge">${esc(TIPI_APP[a.tipo] || a.tipo)}</span>
       <span class="spazio"></span><button class="btn btn-piccolo" data-az="modifica-app" data-id="${esc(a.id)}">Modifica</button></div>
@@ -865,7 +912,8 @@ function disegnaEditor() {
       <label>Via, numero, CAP e città<textarea data-p='["indirizzo","testo"]' rows="2" autocomplete="off">${esc(r.indirizzo.testo)}</textarea></label>
       <div class="riga"><button class="btn btn-piccolo" data-az="posizione">📍 Usa la mia posizione</button></div>
       <div class="mappe-link mappa-link" id="mappe">${linkMappe()}</div>
-      ${r.indirizzo.gps && r.indirizzo.lat != null ? `<p class="muted small" id="pos-salvata" style="margin:.5rem 0 0">Posizione presa sul posto: ${esc(r.indirizzo.lat)}, ${esc(r.indirizzo.lon)}</p>` : ""}
+      ${haPunto(r) ? `<p class="muted small" style="margin:.5rem 0 0">Posizione presa sul posto: ${esc(r.indirizzo.lat)}, ${esc(r.indirizzo.lon)}
+        <button class="btn btn-piccolo btn-pericolo" data-az="togli-posizione" style="margin-left:.3rem">Togli</button></p>` : ""}
     </section>
     ${r.preventivo_id ? `<div class="banner">Misure per il preventivo ${esc(r.preventivo_numero || "")}: ogni riquadro vale per un solo prodotto.<br>
       <button class="btn btn-piccolo" data-az="scegli-prodotti" style="margin-top:.5rem">☑ Scegli i prodotti da misurare</button></div>` : ""}
@@ -1116,7 +1164,7 @@ async function inviaTutti() {
 // l'elenco clienti, il calendario (nei due sensi) e manda i rilievi da inviare. Non serve premere niente.
 // Nota: se l'app è chiusa o in secondo piano l'iPhone la sospende: la sincronizzazione riparte appena la riapri.
 let sincronizzandoTutto = false, ultimaSync = "", erroreSync = "", timerSubito = null;
-const firmaClienti = () => clientiPC.map(c => [c.id, c.nome, c.telefono, c.email, c.indirizzo, c.citta].join("|")).join("§");
+const firmaClienti = () => clientiPC.map(c => [c.id, c.nome, c.telefono, c.email, c.indirizzo, c.citta, c.punto, c.punto_il].join("|")).join("§");
 
 function testoStatoSync() {
   if (!config()) return "Non collegato al computer (Impostazioni).";
@@ -1182,6 +1230,7 @@ async function sincronizzaTutto(silenzioso = true) {
     for (const r of da) { await inviaRilievo(r.id, () => {}); cambiato = true; }
     if (await scaricaRilievi()) cambiato = true;                    // rilievi fatti con gli altri telefoni
     appuntamenti = await db.tuttiApp();
+    await caricaPunti();                                            // posizioni nuove arrivate dagli altri telefoni
     const t = new Date();
     ultimaSync = `${String(t.getHours()).padStart(2, "0")}:${String(t.getMinutes()).padStart(2, "0")}`;
     erroreSync = "";
@@ -1207,9 +1256,8 @@ $app.addEventListener("input", e => {
   if (!p || !rilievo) return;
   const percorso = JSON.parse(p);
   impostaPercorso(rilievo, percorso, e.target.value);
-  if (percorso.join() === "indirizzo,testo") {   // l'indirizzo è stato cambiato a mano: la posizione trovata prima non vale più
-    rilievo.indirizzo.lat = null; rilievo.indirizzo.lon = null; delete rilievo.indirizzo.gps;
-    const p = document.getElementById("pos-salvata"); if (p) p.remove();
+  if (percorso.join() === "indirizzo,testo") {   // correggendo l'indirizzo il punto preso sul posto resta (si toglie con «Togli»)
+    if (!rilievo.indirizzo.gps) { rilievo.indirizzo.lat = null; rilievo.indirizzo.lon = null; }   // vecchie posizioni calcolate: non valgono più
     aggiornaLinkMappe();
   }
   if (percorso.join() === "cliente,nome") {
@@ -1267,6 +1315,11 @@ $app.addEventListener("click", async e => {
     else if (az === "nuova-stanza") foglioStanze();
     else if (az === "nuova-apertura") { rilievo.stanze[s].aperture.push(nuovaApertura()); cambiato(); disegnaEditor(); }
     else if (az === "scegli-cliente") foglioClienti(c => applicaCliente(c));
+    else if (az === "togli-posizione") {
+      if (!confirm("Togliere la posizione presa sul posto da questo rilievo?\n\nSe è già arrivata nella scheda del cliente sul PC, cancellala anche lì.")) return;
+      rilievo.indirizzo.lat = null; rilievo.indirizzo.lon = null; delete rilievo.indirizzo.gps; delete rilievo.indirizzo.gps_il;
+      aggiornaPunto(rilievo); cambiato(); disegnaEditor();
+    }
     else if (az === "usa-cliente") applicaCliente(clientiPC.find(c => c.id === b.dataset.id));
     else if (az === "apri-preventivo") await foglioPreventivo(preventiviPC.find(p => p.id === b.dataset.id));
     else if (az === "duplica") { const copia = JSON.parse(JSON.stringify(rilievo.stanze[s].aperture[a])); copia.foto = []; copia.id = breve() + breve(); delete copia.voci_id; delete copia.titolo; delete copia.prodotti;rilievo.stanze[s].aperture.splice(a + 1, 0, copia); cambiato(); disegnaEditor(); }
@@ -1311,6 +1364,7 @@ async function vai() {
     if (rilievoVuoto(rilievo)) { await db.elimina(rilievo.id); rilievo = null; }
     sincronizzaSubito();
   }
+  await caricaPunti();   // le posizioni prese sul posto servono ai pulsanti delle mappe
   if (m) {
     const r = await db.leggi(m[1]);
     if (!r) { location.hash = ""; return; }
@@ -1326,9 +1380,10 @@ async function vai() {
 addEventListener("hashchange", () => { if (location.hash.startsWith("#cfg=")) importaDaIndirizzo(); vai().catch(e => avviso(e.message, "err")); });
 
 importaDaIndirizzo();
-caricaClientiLocali().then(() => aggiornaClienti()).catch(() => {});   // elenco clienti del PC: quelli già scaricati subito, poi l'aggiornamento
+const clientiPronti = caricaClientiLocali().catch(() => {});   // elenco clienti del PC: quelli già scaricati subito, poi l'aggiornamento
+clientiPronti.then(() => aggiornaClienti()).catch(() => {});
 caricaPreventiviLocali().catch(() => {});
-pulisciVuoti().then(() => vai()).catch(e => { $app.innerHTML =`<main><div class="banner banner-err">Non riesco ad aprire l'archivio del telefono: ${esc(e.message || e)}<br>Se stai usando la navigazione privata, esci e riprova.</div></main>`; });
+Promise.all([clientiPronti, pulisciVuoti()]).then(() => vai()).catch(e => { $app.innerHTML =`<main><div class="banner banner-err">Non riesco ad aprire l'archivio del telefono: ${esc(e.message || e)}<br>Se stai usando la navigazione privata, esci e riprova.</div></main>`; });
 // aggiornamento dell'app: quando il sito pubblicato cambia, il service worker nuovo prende il posto del vecchio e la pagina si ricarica da sola
 async function aggiornaApp() {
   if (timerSalva) await salvaOra();
