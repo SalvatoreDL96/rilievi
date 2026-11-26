@@ -18,7 +18,7 @@ const MISURE = [["larghezza", "Larghezza"], ["altezza_sx", "Altezza sinistra"], 
 const misureDi = a => (a.altezza !== undefined && a.altezza !== "") ? [MISURE[0], ["altezza", "Altezza (vecchio rilievo)"], ...MISURE.slice(1)] : MISURE;
 const CHIAVE_CONFIG = "giode_rilievi_cfg";
 const API = "https://api.github.com";
-const VERSIONE_APP = "11 (26/11/2026)";   // da cambiare insieme a VERSIONE in sw.js a ogni pubblicazione
+const VERSIONE_APP = "12 (26/11/2026)";   // da cambiare insieme a VERSIONE in sw.js a ogni pubblicazione
 
 const $app = document.getElementById("app");
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -633,6 +633,7 @@ const isoData = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, 
 const dataLunga = iso => new Date(iso + "T12:00:00").toLocaleDateString("it-IT", { weekday: "long", day: "numeric", month: "long" });
 const decodifica64 = b => new TextDecoder().decode(Uint8Array.from(atob(String(b).replace(/\s/g, "")), c => c.charCodeAt(0)));
 const appVisibili = () => appuntamenti.filter(a => !a.eliminato);
+const promemoria = a => a.tipo === "altro" ? a.titolo || "" : "";   // il nome dato al promemoria («Altro»)
 
 function mappeApp(indirizzo) {
   if (!indirizzo) return "";
@@ -706,7 +707,8 @@ async function foglioDettaglio(a) {
   v.innerHTML = `<div class="foglio"><h2><span>${esc(TIPI_APP[a.tipo] || a.tipo)} · ${esc(a.ora || "tutto il giorno")}</span> <button class="btn btn-piccolo" data-az="chiudi-foglio">Chiudi</button></h2>
     <div class="card">
       <div class="muted small" style="text-transform:capitalize">${esc(dataLunga(a.data))}</div>
-      ${a.cliente ? `<div style="font-size:1.15rem;font-weight:700;margin:.2rem 0">${esc(a.cliente)}</div>` : ""}
+      ${promemoria(a) ? `<div style="font-size:1.25rem;font-weight:700;margin:.2rem 0">${esc(promemoria(a))}</div>` : ""}
+      ${a.cliente ?`<div style="font-size:1.15rem;font-weight:700;margin:.2rem 0">${esc(a.cliente)}</div>` : ""}
       ${a.telefono ? `<a class="btn btn-piccolo btn-primario" href="tel:${esc(a.telefono)}">📞 Chiama ${esc(a.telefono)}</a>` : ""}
       ${a.indirizzo ? `<p style="margin:.6rem 0 .2rem">${esc(a.indirizzo)}</p>` : ""}
       ${dove ? `${r ? `<iframe class="mappa-app" loading="lazy" referrerpolicy="no-referrer-when-downgrade" title="Mappa"
@@ -732,7 +734,8 @@ function rigaApp(a, conData) {
   return `<div class="app-riga t-${esc(a.tipo)}" data-az="dettaglio-app" data-id="${esc(a.id)}" style="cursor:pointer">
     <div class="riga"><strong>${conData ? esc(dataLunga(a.data)) + " · " : ""}${esc(a.ora || "tutto il giorno")}</strong><span class="badge">${esc(TIPI_APP[a.tipo] || a.tipo)}</span>
       <span class="spazio"></span><button class="btn btn-piccolo" data-az="modifica-app" data-id="${esc(a.id)}">Modifica</button></div>
-    ${a.cliente ? `<div><strong>${esc(a.cliente)}</strong>${a.telefono ? ` · <a href="tel:${esc(a.telefono)}">${esc(a.telefono)}</a>` : ""}</div>` : ""}
+    ${promemoria(a) ? `<div class="app-nome">${esc(promemoria(a))}</div>` : ""}
+    ${a.cliente ?`<div><strong>${esc(a.cliente)}</strong>${a.telefono ? ` · <a href="tel:${esc(a.telefono)}">${esc(a.telefono)}</a>` : ""}</div>` : ""}
     ${a.indirizzo ? `<div class="small">${esc(a.indirizzo)}</div>` : ""}
     ${azioni ? `<div class="mappa-link">${azioni}</div>` : ""}
     ${a.nota ? `<div class="small muted" style="white-space:pre-wrap;margin-top:.3rem">${esc(a.nota)}</div>` : ""}</div>`;
@@ -782,6 +785,7 @@ function foglioAppuntamento(esistente) {
   v.innerHTML = `<div class="foglio"><h2>${esistente ? "Modifica appuntamento" : "Nuovo appuntamento"} <button class="btn btn-piccolo" data-az="chiudi-foglio">Chiudi</button></h2>
     <div class="card">
       <label>Che cosa<select id="ap-tipo">${Object.entries(TIPI_APP).map(([k, n]) => `<option value="${k}" ${k === a.tipo ? "selected" : ""}>${n}</option>`).join("")}</select></label>
+      <label id="ap-riga-titolo" ${a.tipo === "altro" ? "" : "hidden"}>Nome del promemoria<input id="ap-titolo" value="${esc(a.titolo || "")}" autocomplete="off" autocapitalize="sentences" placeholder="Per esempio: chiamare il fornitore"></label>
       <div class="griglia"><label>Data<input id="ap-data" type="date" value="${esc(a.data)}"></label><label>Ora<input id="ap-ora" type="time" value="${esc(a.ora)}"></label></div>
       <button class="btn btn-piccolo" data-az="scegli-cliente-app" style="margin-bottom:.6rem">👥 Scegli dai clienti del PC</button>
       <label>Cliente<input id="ap-cliente" value="${esc(a.cliente)}" autocomplete="off" autocapitalize="words"></label>
@@ -790,6 +794,7 @@ function foglioAppuntamento(esistente) {
       <label>Nota<textarea id="ap-nota" rows="3">${esc(a.nota)}</textarea></label>
       <div class="riga"><button class="btn btn-primario" data-az="salva-app">Salva</button>
         ${esistente ? `<button class="btn btn-pericolo" data-az="elimina-app">Elimina</button>` : ""}</div></div></div>`;
+  v.querySelector("#ap-tipo").addEventListener("change", e => { v.querySelector("#ap-riga-titolo").hidden = e.target.value !== "altro"; });
   let clienteId = a.cliente_id || "";   // cliente del PC scelto dall'elenco (se c'è)
   v.addEventListener("click", async e => {
     const az = e.target.dataset.az;
@@ -814,6 +819,8 @@ function foglioAppuntamento(esistente) {
         cliente: v.querySelector("#ap-cliente").value.trim(), telefono: v.querySelector("#ap-tel").value.trim(), indirizzo: v.querySelector("#ap-ind").value.trim(),
         nota: v.querySelector("#ap-nota").value.trim(), creato: esistente ? esistente.creato : t, modificato: t, eliminato: false };
       if (clienteId) nuovo.cliente_id = clienteId; else delete nuovo.cliente_id;
+      const titolo = v.querySelector("#ap-titolo").value.trim();
+      if (nuovo.tipo === "altro" && titolo) nuovo.titolo = titolo; else delete nuovo.titolo;
       await db.salvaApp(nuovo);
       giornoApp = data; meseApp = new Date(data + "T12:00:00"); meseApp.setDate(1);
       appuntamenti = await db.tuttiApp(); v.remove(); disegnaCalendario(); avviso("Appuntamento salvato.", "ok");

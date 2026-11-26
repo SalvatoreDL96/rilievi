@@ -1,7 +1,7 @@
 // Fa funzionare il sito anche senza rete (dai clienti il segnale spesso manca): i file del sito si tengono in memoria.
 // Le chiamate a GitHub e alle mappe non passano di qui: vanno sempre direttamente in rete.
 // Quando si pubblica una versione nuova basta cambiare VERSIONE: l'app la scarica da sola e si ricarica.
-const VERSIONE = "rilievi-v11";
+const VERSIONE = "rilievi-v12";
 const FILE = ["./", "index.html", "app.js", "stile.css", "manifest.webmanifest", "icone/icona-180.png", "icone/icona-192.png", "icone/icona-512.png"];
 
 self.addEventListener("install", e => {
