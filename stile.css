@@ -140,4 +140,12 @@ input[type=file] { display: none; }
 .cliente-voce .small { display: block; }
 
 .prodotti-preventivo { background: #efe7dc; border-radius: 8px; padding: .4rem .65rem; margin-bottom: .5rem; font-size: .9rem; }
+
+/* scelta dei prodotti da misurare */
+.scelta-prodotto { display: flex; gap: .7rem; align-items: flex-start; padding: .55rem 0; margin: 0; border-top: 1px solid var(--line); font-weight: 400; font-size: 1rem; cursor: pointer; }
+.scelta-prodotto:first-of-type { border-top: 0; }
+.scelta-prodotto input[type=checkbox] { -webkit-appearance: auto; appearance: auto; flex: none; width: 26px; height: 26px; min-height: 0; margin: .1rem 0 0; padding: 0; accent-color: var(--brand); }
+.scelta-prodotto > span { display: block; min-width: 0; }
+.scelta-prodotto .small { display: block; }
+.scelta-prodotto .misure-prese { white-space: pre-line; }
 .schede a { font-size: .95rem; }
