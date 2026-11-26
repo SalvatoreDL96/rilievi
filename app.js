@@ -18,7 +18,7 @@ const MISURE = [["larghezza", "Larghezza"], ["altezza_sx", "Altezza sinistra"], 
 const misureDi = a => (a.altezza !== undefined && a.altezza !== "") ? [MISURE[0], ["altezza", "Altezza (vecchio rilievo)"], ...MISURE.slice(1)] : MISURE;
 const CHIAVE_CONFIG = "giode_rilievi_cfg";
 const API = "https://api.github.com";
-const VERSIONE_APP = "12 (26/11/2026)";   // da cambiare insieme a VERSIONE in sw.js a ogni pubblicazione
+const VERSIONE_APP = "14 (26/11/2026)";   // da cambiare insieme a VERSIONE in sw.js a ogni pubblicazione
 
 const $app = document.getElementById("app");
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -562,7 +562,8 @@ async function disegnaPreventivi() {
     const r = fatti.get(p.id), prodotti = (p.stanze || []).reduce((n, s) => n + (s.voci || []).length, 0);
     return `<div class="card cliccabile" data-az="apri-preventivo" data-id="${esc(p.id)}">
       <div class="riga"><span class="rilievo-titolo">${esc(p.cliente.nome || "Cliente senza nome")}</span><span class="spazio"></span>
-        ${r ? (r.bozza ? `<span class="badge badge-attesa">misure in bozza</span>` : `<span class="badge badge-ok">misure prese ✓</span>`) : `<span class="badge">da misurare</span>`}</div>
+        ${r ? (r.bozza ? `<span class="badge badge-attesa">misure in bozza</span>` : `<span class="badge badge-ok">misure prese ✓</span>`)
+          : p.rilievo_preso ? `<span class="badge badge-ok">rilievo preso ✓</span>` : `<span class="badge">da misurare</span>`}</div>
       <div class="rilievo-riga">${p.numero ? "n. " + esc(p.numero) + " · " : ""}${esc(p.data)}${p.cliente.indirizzo ? " · " + esc(p.cliente.indirizzo) : ""}</div>
       <div class="rilievo-riga">${(p.stanze || []).length} stanze · ${prodotti} prodotti</div></div>`;
   }).join("") || `<div class="vuoto">${preventiviPC.length ? "Nessun preventivo trovato." : "Nessun preventivo in corso.<br>Sul computer i preventivi «In corso» arrivano qui da soli."}</div>`;
@@ -876,10 +877,10 @@ function disegnaEditor() {
           <div class="griglia">${campoTesto(["stanze", si, "nome"], "Nome della stanza", s.nome)}<label>Zona<input value="${esc(s.categoria)}" data-p='["stanze",${si},"categoria"]' autocomplete="off"></label></div>
           ${(s.aperture || []).map((a, ai) => `
             <div class="apertura">
-              ${a.prodotti ? `<div class="prodotti-preventivo">${a.prodotti.map(p => `<div>🧵 ${esc(p)}</div>`).join("")}</div>` : ""}
               <div class="intest"><strong>${esc(a.titolo || `${a.tipo || "Apertura"} ${ai + 1}`)}</strong>
                 ${a.voci_id ? "" : `<button class="btn btn-piccolo" data-az="duplica" data-s="${si}" data-a="${ai}">Duplica</button>`}
                 <button class="btn btn-piccolo btn-pericolo" data-az="elimina-apertura" data-s="${si}" data-a="${ai}">Elimina</button></div>
+              ${a.prodotti ? `<div class="prodotti-preventivo">${a.prodotti.map(p => `<div>🧵 ${esc(p)}</div>`).join("")}</div>` : ""}
               ${a.finestra || a.dettaglio ? `<div class="prodotti-preventivo">${esc([a.finestra, a.dettaglio].filter(Boolean).join(" · "))}</div>` : ""}
               ${a.voci_id ? "" : `<label>Tipo<select data-p='["stanze",${si},"aperture",${ai},"tipo"]'>${TIPI_APERTURA.map(t => `<option ${t === a.tipo ? "selected" : ""}>${esc(t)}</option>`).join("")}</select></label>`}
               <div class="griglia">${misureDi(a).map(([k, et]) => campoMisura(["stanze", si, "aperture", ai, k], et, a[k])).join("")}</div>
