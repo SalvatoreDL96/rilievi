@@ -18,7 +18,7 @@ const MISURE = [["larghezza", "Larghezza"], ["altezza_sx", "Altezza sinistra"], 
 const misureDi = a => (a.altezza !== undefined && a.altezza !== "") ? [MISURE[0], ["altezza", "Altezza (vecchio rilievo)"], ...MISURE.slice(1)] : MISURE;
 const CHIAVE_CONFIG = "giode_rilievi_cfg";
 const API = "https://api.github.com";
-const VERSIONE_APP = "10 (26/11/2026)";   // da cambiare insieme a VERSIONE in sw.js a ogni pubblicazione
+const VERSIONE_APP = "11 (26/11/2026)";   // da cambiare insieme a VERSIONE in sw.js a ogni pubblicazione
 
 const $app = document.getElementById("app");
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -343,27 +343,49 @@ function barra(titolo, { indietro, impostazioni, stato } = {}) {
     ${impostazioni ? `<button data-az="impostazioni" aria-label="Impostazioni">⚙︎</button>` : ""}</header>`;
 }
 
+// elenco dei rilievi: per data (il più recente in cima), con la data in vista e la ricerca
+let cercaRilievo = "", rilieviHome = [];
+const dataDelRilievo = (iso, opzioni) => { const d = new Date(iso + "T12:00:00"); return isNaN(d) ? String(iso || "") : d.toLocaleDateString("it-IT", opzioni); };
+const dataBreve = iso => dataDelRilievo(iso, { weekday: "short", day: "2-digit", month: "2-digit", year: "numeric" });
+// quello in cui si cerca: cliente, telefono, indirizzo, numero del preventivo e la data (26/11/2026 oppure «26 novembre»)
+const testoRilievo = r => normNome([r.cliente.nome, r.cliente.telefono, r.cliente.email, r.indirizzo.testo, r.preventivo_numero,
+  dataBreve(r.data), dataDelRilievo(r.data, { day: "numeric", month: "long", year: "numeric" })].join(" "));
+
+function schedeRilievi() {
+  const parole = normNome(cercaRilievo).split(" ").filter(Boolean);
+  const trovati = rilieviHome.filter(r => { const testo = testoRilievo(r); return parole.every(p => testo.includes(p)); });
+  return trovati.map(r => `<div class="card cliccabile" data-apri="${esc(r.id)}">
+      <div class="riga"><span class="data-rilievo">📅 ${esc(dataBreve(r.data))}</span><span class="spazio"></span>
+        ${r.bozza ? `<span class="badge badge-attesa">bozza: non salvato</span>` : daInviare(r) ? `<span class="badge badge-attesa">da inviare</span>` : `<span class="badge badge-ok">inviato</span>`}</div>
+      <div class="rilievo-titolo">${esc(r.cliente.nome || "Cliente senza nome")}</div>
+      ${r.indirizzo.testo ? `<div class="rilievo-riga">${esc(r.indirizzo.testo)}</div>` : ""}
+      <div class="rilievo-riga">${(r.stanze || []).length} stanze · ${contaAperture(r)} aperture · ${nomiFoto(r).length} foto</div></div>`).join("")
+    || `<div class="vuoto">${rilieviHome.length ? "Nessun rilievo trovato." : "Nessun rilievo.<br>Premi «Nuovo rilievo» per cominciare il primo sopralluogo."}</div>`;
+}
+
 async function vistaHome(conservaScroll) {
   const scrollPrima = window.scrollY;
   rilievo = null;
-  const elenco = (await db.tutti()).filter(r => !r.eliminato).sort((a, b) => (b.data + b.modificato).localeCompare(a.data + a.modificato));
+  rilieviHome = (await db.tutti()).filter(r => !r.eliminato).sort((a, b) => (b.data + b.modificato).localeCompare(a.data + a.modificato));
   const cfg = config();
-  const attesa = elenco.filter(daInviare).length;
+  const attesa = rilieviHome.filter(daInviare).length;
+  const testoInvia = `⟳ Invia al PC${attesa ? ` (${attesa})` : ""}`;
+  const box = document.getElementById("elenco-rilievi");
+  if (box && conservaScroll) {   // aggiornamento mentre si guarda l'elenco: la casella di ricerca (e la tastiera) restano
+    box.innerHTML = schedeRilievi();
+    const invia = $app.querySelector('[data-az="invia"]');
+    if (invia) { invia.textContent = testoInvia; invia.disabled = !(cfg && attesa); }
+    return;
+  }
   const appenaCollegato = cfg && !standalone() && location.hash.startsWith("#cfg=");
   $app.innerHTML = barra("Rilievi Giodè", { impostazioni: true }) + `<main>${schede("rilievi")}
     ${appenaCollegato ? `<div class="banner"><strong>Collegato ✓</strong> Per avere l'app sulla schermata Home, <strong>adesso</strong> tocca Condividi <span aria-hidden="true">⬆︎</span> → «Aggiungi alla schermata Home» da questa pagina, poi aprila dall'icona.</div>` : ""}
     ${cfg ? "" :`<div class="banner"><strong>Manca il collegamento al computer.</strong> Puoi già fare i rilievi, ma per mandarli al PC serve il collegamento: apri <a href="#/impostazioni">Impostazioni</a>.</div>`}
-    ${elenco.map(r => {
-      const nFoto = nomiFoto(r).length;
-      return `<div class="card cliccabile" data-apri="${esc(r.id)}">
-        <div class="riga"><span class="rilievo-titolo">${esc(r.cliente.nome || "Cliente senza nome")}</span><span class="spazio"></span>
-          ${r.bozza ? `<span class="badge badge-attesa">bozza: non salvato</span>` : daInviare(r) ? `<span class="badge badge-attesa">da inviare</span>` : `<span class="badge badge-ok">inviato</span>`}</div>
-        <div class="rilievo-riga">${esc(r.data)}${r.indirizzo.testo ? " · " + esc(r.indirizzo.testo) : ""}</div>
-        <div class="rilievo-riga">${(r.stanze || []).length} stanze · ${contaAperture(r)} aperture · ${nFoto} foto</div></div>`;
-    }).join("") || `<div class="vuoto">Nessun rilievo.<br>Premi «Nuovo rilievo» per cominciare il primo sopralluogo.</div>`}
+    <input id="cerca-rilievo" type="search" placeholder="Cerca per cliente, indirizzo o data" value="${esc(cercaRilievo)}" autocomplete="off" style="margin-bottom:.8rem">
+    <div id="elenco-rilievi">${schedeRilievi()}</div>
   </main>
   <div class="fondo"><div><button class="btn btn-primario" data-az="nuovo">+ Nuovo rilievo</button>
-    <button class="btn" data-az="invia" ${cfg && attesa ? "" : "disabled"}>⟳ Invia al PC${attesa ? ` (${attesa})` : ""}</button></div></div>`;
+    <button class="btn" data-az="invia" ${cfg && attesa ? "" : "disabled"}>${testoInvia}</button></div></div>`;
   window.scrollTo(0, conservaScroll ? scrollPrima : 0);
 }
 
@@ -1172,6 +1194,7 @@ setTimeout(() => sincronizzaTutto(true), 2500);
 // ------------------------------------------------------------------------------------------------ eventi
 $app.addEventListener("input", e => {
   if (e.target.id === "cerca-preventivo") { cercaPreventivo = e.target.value; disegnaPreventivi(); return; }
+  if (e.target.id === "cerca-rilievo") { cercaRilievo = e.target.value; document.getElementById("elenco-rilievi").innerHTML = schedeRilievi(); return; }
   const p = e.target.dataset && e.target.dataset.p;
   if (!p || !rilievo) return;
   const percorso = JSON.parse(p);
